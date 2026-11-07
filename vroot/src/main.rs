@@ -19,9 +19,10 @@ fn usage() {
         "vroot — deny-by-default FUSE virtual root
 
 Usage:
+  vroot --config <file> --run-dir <dir> [--mount-point <dir>]
   vroot --config <file> [--mount-point <dir>] [--control-socket <path>]
-                               [--broker-socket <path>] [--request-socket <path>]
-                               [--read-only]
+                        [--broker-socket <path>] [--request-socket <path>]
+                        [--read-only]
   vroot --config <file> --check <virtual-path>...
   vroot --config <file> --tree
 
@@ -35,10 +36,13 @@ The config file is TOML:
   writable = true
 
 Every path not covered by a [[mount]] is ENOENT. Writes to a read-only mount
-can be granted at runtime through the control socket (default:
-<mount point>/../vroot.sock, host-only). If a prompt broker is listening on
-the broker socket (default: <mount point>/../broker.sock) the daemon asks it
-before refusing such a write."
+can be granted at runtime through the control socket (host-only). If a prompt
+broker is listening on the broker socket the daemon asks it before refusing
+such a write.
+
+--run-dir is where the daemon keeps its sockets and nothing else of the
+program: vroot.sock, broker.sock and request.sock are derived from it. Without
+it they default to the mount point's parent directory."
     );
 }
 
@@ -47,6 +51,7 @@ fn main() -> Result<()> {
 
     let mut config_path: Option<PathBuf> = None;
     let mut mount_point: Option<PathBuf> = None;
+    let mut run_dir: Option<PathBuf> = None;
     let mut control_socket: Option<PathBuf> = None;
     let mut broker_socket: Option<PathBuf> = None;
     let mut request_socket: Option<PathBuf> = None;
@@ -60,6 +65,11 @@ fn main() -> Result<()> {
             "-c" | "--config" => {
                 config_path = Some(PathBuf::from(
                     args.next().context("--config needs a path")?,
+                ))
+            }
+            "--run-dir" => {
+                run_dir = Some(PathBuf::from(
+                    args.next().context("--run-dir needs a directory")?,
                 ))
             }
             "-m" | "--mount-point" => {
@@ -155,11 +165,13 @@ fn main() -> Result<()> {
         opts.push(MountOption::AllowOther);
     }
 
-    let sock = control_socket.unwrap_or_else(|| {
-        mp.parent()
-            .unwrap_or_else(|| Path::new("/"))
-            .join("vroot.sock")
-    });
+    // Sockets default to the run directory when one is given, else beside the
+    // mount point (the older behaviour).
+    let socket_dir = run_dir
+        .clone()
+        .or_else(|| mp.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("/"));
+    let sock = control_socket.unwrap_or_else(|| socket_dir.join("vroot.sock"));
     let table = std::sync::Arc::new(std::sync::RwLock::new(MountTable::new(
         cfg.mounts,
         cfg.synthetic,
@@ -167,22 +179,14 @@ fn main() -> Result<()> {
     let policy = std::sync::Arc::new(std::sync::Mutex::new(policy::Policy::default()));
     ctl::serve(sock, policy.clone(), table.clone())?;
 
-    let broker = broker_socket.or_else(|| {
-        Some(
-            mp.parent()
-                .unwrap_or_else(|| Path::new("/"))
-                .join("broker.sock"),
-        )
-    });
+    let broker = broker_socket
+        .clone()
+        .or_else(|| Some(socket_dir.join("broker.sock")));
     if let Some(b) = &broker {
         log::info!("prompt broker socket: {} (optional)", b.display());
     }
 
-    let request = request_socket.unwrap_or_else(|| {
-        mp.parent()
-            .unwrap_or_else(|| Path::new("/"))
-            .join("request.sock")
-    });
+    let request = request_socket.unwrap_or_else(|| socket_dir.join("request.sock"));
     req::serve(request, table.clone(), broker.clone())?;
     let fs = VrootFs::new(table, policy, broker);
     log::info!("mounting at {}", mp.display());

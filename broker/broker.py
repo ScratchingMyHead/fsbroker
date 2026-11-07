@@ -576,11 +576,13 @@ def serve(broker):
 
 
 def main():
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     p = argparse.ArgumentParser(description="fsbroker permission broker")
-    p.add_argument("--socket", default=os.path.join(root, "run", "broker.sock"))
-    p.add_argument("--state", default=os.path.join(root, "run", "broker-state.json"))
-    p.add_argument("--audit", default=os.path.join(root, "run", "audit.log"))
+    p.add_argument("--run-dir", default=os.environ.get("FSBROKER_RUN_DIR"),
+                   help="where the socket, state and audit log live "
+                        "(env FSBROKER_RUN_DIR)")
+    p.add_argument("--socket", default=None, help="override the socket path")
+    p.add_argument("--state", default=None, help="override the state file")
+    p.add_argument("--audit", default=None, help="override the audit log")
     p.add_argument("--no-gui", action="store_true",
                    help="never show a dialog; deny anything not already granted")
     p.add_argument("--test-answer", default=os.environ.get("FSBROKER_TEST_ANSWER"),
@@ -588,6 +590,15 @@ def main():
     p.add_argument("--test-request", default=os.environ.get("FSBROKER_TEST_REQUEST"),
                    help="answer every add-request with deny|ro|rw (for tests)")
     args = p.parse_args()
+
+    # Everything the broker writes lives under the run directory.
+    run = args.run_dir or os.path.join(
+        os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
+        "fsbroker",
+    )
+    args.socket = args.socket or os.path.join(run, "broker.sock")
+    args.state = args.state or os.path.join(run, "broker-state.json")
+    args.audit = args.audit or os.path.join(run, "audit.log")
 
     broker = Broker(args)
 

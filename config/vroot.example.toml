@@ -1,0 +1,59 @@
+# fsbroker mapping example.
+#
+# Copy this to ~/.config/fsbroker/vroot.toml (or point --config at it) and edit.
+# Every [[mount]] without virtual_path appears inside the sandbox at the same
+# absolute path it has on the host (identity mapping). Anything not listed is
+# ENOENT. Read-only is the default; writable = true is the explicit opt-in.
+#
+# Two placeholders are expanded before the daemon reads this file:
+#   ${run}   the run directory (--run-dir / FSBROKER_RUN_DIR)
+#   ${home}  the sandbox's writable home (default ${run}/home)
+
+# The sandbox's own writable home, at the fixed path /home/agent. Keep this: it
+# is the only place the agent can write without asking.
+[[mount]]
+virtual_path = "/home/agent"
+host = "${home}"
+writable = true
+
+# Read-only runtime the GUI and the dynamic linker need.
+[[mount]]
+host = "/usr"
+[[mount]]
+host = "/bin"
+[[mount]]
+host = "/sbin"
+[[mount]]
+host = "/lib"
+[[mount]]
+host = "/lib64"
+[[mount]]
+host = "/opt/OpenCode"
+
+# A curated /etc (built from the safe subset of the host /etc) so the dynamic
+# linker, fonts and TLS work. Generated into the run dir, so host /etc/shadow
+# and host keys never appear.
+[[mount]]
+virtual_path = "/etc"
+host = "${run}/etc-view"
+
+# Real user data, read-only by default. Writes escalate to the broker.
+# [[mount]]
+# host = "/home/rj/Documents"
+# [[mount]]
+# host = "/home/rj/src"
+
+# Empty placeholders so bubblewrap can mount its own /proc, /dev, /tmp and /run
+# on top of them.
+[[mount]]
+virtual_path = "/proc"
+host = "${run}/placeholders/proc"
+[[mount]]
+virtual_path = "/dev"
+host = "${run}/placeholders/dev"
+[[mount]]
+virtual_path = "/tmp"
+host = "${run}/placeholders/tmp"
+[[mount]]
+virtual_path = "/run"
+host = "${run}/placeholders/run"

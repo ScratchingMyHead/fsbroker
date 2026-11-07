@@ -13,8 +13,11 @@ import os
 import socket
 import sys
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SOCK = os.environ.get("FSBROKER_SOCK", os.path.join(ROOT, "run", "broker.sock"))
+RUN_DIR = os.environ.get("FSBROKER_RUN_DIR") or os.path.join(
+    os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
+    "fsbroker",
+)
+SOCK = os.environ.get("FSBROKER_SOCK", os.path.join(RUN_DIR, "broker.sock"))
 
 USAGE = __doc__
 

@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# fsbroker — run a program inside a deny-by-default filesystem sandbox.
+#
+#   fsbroker [--config <file>] [--run-dir <dir>] [--home <dir>] <command> ...
+#
+# Commands:
+#   build                 compile the daemon (cargo build --release)
+#   mount                 start the virtual-root daemon
+#   umount                stop the daemon
+#   broker start|stop|status
+#   shell                 start a shell inside the sandbox
+#   run [--] <cmd> ...    run a command inside the sandbox
+#   opencode [args]       run the OpenCode desktop GUI inside the sandbox
+#   status                show what the agent can currently access
+#   paths                 print the resolved locations and exit
+#   help
+#
+# Locations (all runtime/state lives outside this repository):
+#   --run-dir / FSBROKER_RUN_DIR   default ${XDG_STATE_HOME:-~/.local/state}/fsbroker
+#   --config  / FSBROKER_CONFIG    default ${XDG_CONFIG_HOME:-~/.config}/fsbroker/vroot.toml
+#   --home    / FSBROKER_HOME      default <run-dir>/home
+#
+# The run directory holds: mount/ (the FUSE mount point), the *.sock files,
+# *.pid, broker-state.json, audit.log, log/, home/ (the sandbox home), and the
+# generated etc-view/ and placeholders/.
+set -uo pipefail
+
+SELF=$(readlink -f -- "${BASH_SOURCE[0]}")
+REPO=$(cd -- "$(dirname -- "$SELF")/.." && pwd)
+
+RUN_DIR=${FSBROKER_RUN_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/fsbroker}
+CONFIG=${FSBROKER_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/fsbroker/vroot.toml}
+HOME_HOST=${FSBROKER_HOME:-}
+OPENCODE_BIN=${FSBROKER_OPENCODE_BIN:-/opt/OpenCode/ai.opencode}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --run-dir) RUN_DIR=${2:?--run-dir needs a directory}; shift 2 ;;
+    --config)  CONFIG=${2:?--config needs a file}; shift 2 ;;
+    --home)    HOME_HOST=${2:?--home needs a directory}; shift 2 ;;
+    --help|-h) set -- help ;;
+    --) shift; break ;;
+    -*) echo "fsbroker: unknown option: $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+
+HOME_HOST=${HOME_HOST:-$RUN_DIR/home}
+MOUNT="$RUN_DIR/mount"
+RESOLVED="$RUN_DIR/vroot.resolved.toml"
+DAEMON="$REPO/vroot/target/release/vroot"
+LOG_DIR="$RUN_DIR/log"
+
+HOST_USER=${HOST_USER:-$(id -un)}
+HOST_USER_HOME=$(getent passwd "$HOST_USER" | cut -d: -f6)
+DISPLAY=${DISPLAY:-:0}
+
+say()  { printf 'fsbroker: %s\n' "$*"; }
+die()  { printf 'fsbroker: %s\n' "$*" >&2; exit 1; }
+
+cmd=${1:-help}; shift || true
+
+# --------------------------------------------------------------------------
+# shared setup
+# --------------------------------------------------------------------------
+
+resolve_config() {
+  [ -f "$CONFIG" ] || die "no config file at $CONFIG (copy config/vroot.example.toml)"
+  # Expand the two placeholders into a concrete config the daemon reads.
+  sed -e "s|\${run}|$RUN_DIR|g" -e "s|\${home}|$HOME_HOST|g" "$CONFIG" > "$RESOLVED"
+}
+
+prepare_run_dir() {
+  mkdir -p "$RUN_DIR" "$MOUNT" "$HOME_HOST" "$LOG_DIR" \
+           "$RUN_DIR/tmp" "$RUN_DIR/shm" "$RUN_DIR/user1000" \
+           "$RUN_DIR/placeholders/proc" "$RUN_DIR/placeholders/dev" \
+           "$RUN_DIR/placeholders/tmp" "$RUN_DIR/placeholders/run" \
+           "$HOME_HOST/.local/bin"
+  chmod 700 "$RUN_DIR/user1000"
+  chmod 1777 "$RUN_DIR/tmp" "$RUN_DIR/shm"
+}
+
+make_etc_view() {
+  local etc="$RUN_DIR/etc-view"
+  rm -rf "$etc"; mkdir -p "$etc"
+  local uid gid; uid=$(id -u "$HOST_USER"); gid=$(id -g "$HOST_USER")
+  cat > "$etc/passwd" <<EOF
+root:x:0:0:root:/root:/bin/bash
+$HOST_USER:x:$uid:$gid:$HOST_USER:/home/agent:/bin/bash
+EOF
+  cat > "$etc/group" <<EOF
+root:x:0:
+$HOST_USER:x:$gid:
+EOF
+  cat > "$etc/nsswitch.conf" <<'EOF'
+passwd: files
+group: files
+shadow: files
+hosts: files dns
+networks: files
+EOF
+  printf 'opencode-sandbox\n' > "$etc/hostname"
+  cat > "$etc/hosts" <<'EOF'
+127.0.0.1 localhost opencode-sandbox
+::1 localhost ip6-localhost ip6-loopback
+EOF
+  printf '0123456789abcdef0123456789abcdef\n' > "$etc/machine-id"
+  local f
+  for f in ssl fonts ld.so.cache ld.so.conf ld.so.conf.d xdg os-release \
+           localtime mime.types gtk-3.0 drirc resolv.conf; do
+    local src="/etc/$f" dest="$etc/$f"
+    [ -e "$src" ] || continue
+    mkdir -p "$(dirname "$dest")"
+    if [ -d "$src" ]; then cp -rL --preserve=mode,timestamps "$src/." "$dest/" 2>/dev/null || true
+    else cp -L --preserve=mode,timestamps "$src" "$dest" 2>/dev/null || true; fi
+  done
+}
+
+ensure_daemon_built() {
+  [ -x "$DAEMON" ] && return 0
+  say "building the daemon (cargo build --release)"
+  "${CARGO:-$HOME/.cargo/bin/cargo}" build --release --manifest-path "$REPO/vroot/Cargo.toml" \
+    || die "build failed"
+}
+
+is_mounted() { mountpoint -q "$MOUNT"; }
+mount_entry() { mount | grep -q " $MOUNT "; }
+
+# --------------------------------------------------------------------------
+# commands
+# --------------------------------------------------------------------------
+
+cmd_build() {
+  "${CARGO:-$HOME/.cargo/bin/cargo}" build --release --manifest-path "$REPO/vroot/Cargo.toml"
+}
+
+cmd_mount() {
+  ensure_daemon_built
+  if is_mounted; then say "already mounted at $MOUNT"; return 0; fi
+  if mount_entry; then fusermount3 -uz "$MOUNT" 2>/dev/null || umount -l "$MOUNT" 2>/dev/null || true; fi
+  prepare_run_dir
+  make_etc_view
+  resolve_config
+  say "mounting $MOUNT (run dir $RUN_DIR)"
+  RUST_LOG=${RUST_LOG:-info} setsid nohup "$DAEMON" \
+    --config "$RESOLVED" --run-dir "$RUN_DIR" --mount-point "$MOUNT" \
+    >>"$LOG_DIR/vroot.log" 2>&1 &
+  echo $! > "$RUN_DIR/vroot.pid"
+  local i
+  for i in $(seq 1 50); do is_mounted && { say "mounted"; return 0; }; sleep 0.1; done
+  die "mount did not appear; see $LOG_DIR/vroot.log"
+}
+
+cmd_umount() {
+  if is_mounted || mount_entry; then
+    fusermount3 -uz "$MOUNT" 2>/dev/null || umount -l "$MOUNT" 2>/dev/null || true
+  fi
+  if [ -f "$RUN_DIR/vroot.pid" ]; then
+    kill "$(cat "$RUN_DIR/vroot.pid")" 2>/dev/null || true
+    rm -f "$RUN_DIR/vroot.pid"
+  fi
+  say "unmounted $MOUNT"
+}
+
+broker_running() { [ -f "$RUN_DIR/broker.pid" ] && kill -0 "$(cat "$RUN_DIR/broker.pid")" 2>/dev/null; }
+
+cmd_broker() {
+  local sub=${1:-status}
+  case "$sub" in
+    start)
+      if broker_running; then say "broker already running"; return 0; fi
+      shift || true
+      setsid nohup python3 "$REPO/broker/broker.py" --run-dir "$RUN_DIR" "$@" \
+        >>"$LOG_DIR/broker.log" 2>&1 &
+      echo $! > "$RUN_DIR/broker.pid"
+      say "broker started";;
+    stop)
+      if broker_running; then kill "$(cat "$RUN_DIR/broker.pid")" 2>/dev/null || true; fi
+      rm -f "$RUN_DIR/broker.pid"; say "broker stopped";;
+    status)
+      if broker_running; then say "broker running"; else say "broker not running"; fi;;
+    *) die "broker {start|stop|status}";;
+  esac
+}
+
+cmd_status() { exec "$REPO/bin/fsbroker-status" --run-dir "$RUN_DIR"; }
+
+cmd_paths() {
+  cat <<EOF
+repo          $REPO
+run dir       $RUN_DIR
+config        $CONFIG
+resolved      $RESOLVED
+mount point   $MOUNT
+sandbox home  $HOME_HOST
+sockets       $RUN_DIR/{vroot,broker,request}.sock
+state         $RUN_DIR/broker-state.json
+audit         $RUN_DIR/audit.log
+logs          $LOG_DIR
+EOF
+}
+
+# bwrap arguments for entering the sandbox; fills BWRAP_ARGS.
+sandbox_args() {
+  is_mounted || die "the virtual root is not mounted; run: fsbroker mount"
+  [ -S "$RUN_DIR/request.sock" ] || die "request socket missing; is the daemon running?"
+  BWRAP_ARGS=(
+    --unshare-all --share-net --die-with-parent --new-session
+    --hostname opencode-sandbox --cap-drop ALL
+    --bind "$MOUNT" /
+    --proc /proc --dev /dev
+    --bind "$RUN_DIR/tmp" /tmp
+    --tmpfs /run
+    --bind "$RUN_DIR/user1000" /run/user/1000
+    --bind "$RUN_DIR/shm" /dev/shm
+    --ro-bind "$RUN_DIR/request.sock" /run/user/1000/fsbroker-request.sock
+    --ro-bind "$REPO/bin/fsbroker-request" /home/agent/.local/bin/fsbroker-request
+    --ro-bind "/tmp/.X11-unix/X0" "/tmp/.X11-unix/X0"
+    --ro-bind "$HOST_USER_HOME/.Xauthority" "/home/agent/.Xauthority"
+    --setenv HOME /home/agent
+    --setenv USER "$HOST_USER"
+    --setenv LOGNAME "$HOST_USER"
+    --setenv SHELL /bin/bash
+    --setenv PATH "/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin"
+    --setenv DISPLAY "$DISPLAY"
+    --setenv XAUTHORITY /home/agent/.Xauthority
+    --setenv XDG_SESSION_TYPE x11
+    --setenv XDG_RUNTIME_DIR /run/user/1000
+    --setenv LANG "${LANG:-C.UTF-8}"
+    --chdir /home/agent
+  )
+  local v
+  for v in OPENROUTER_API_KEY VLLM_API_KEY; do
+    [ -n "${!v:-}" ] && BWRAP_ARGS+=(--setenv "$v" "${!v}")
+  done
+}
+
+sandbox_exec() { sandbox_args; exec bwrap "${BWRAP_ARGS[@]}" -- "$@"; }
+
+cmd_shell() { sandbox_exec "${SHELL:-/bin/bash}" "$@"; }
+cmd_run()   { [ $# -gt 0 ] || die "run needs a command"; sandbox_exec "$@"; }
+
+cmd_opencode() {
+  [ -x "$OPENCODE_BIN" ] || die "OpenCode binary not found at $OPENCODE_BIN"
+  rm -f "$HOME_HOST/.local/state/opencode/service.json" "$HOME_HOST/.config/opencode/service.json"
+  sandbox_exec "$OPENCODE_BIN" --no-sandbox --disable-gpu --ozone-platform=x11 \
+    --remote-debugging-port=9333 "$@"
+}
+
+cmd_help() { sed -n '2,30p' "$SELF" | sed 's/^# \{0,1\}//'; }
+
+case "$cmd" in
+  build)    cmd_build ;;
+  mount)    cmd_mount ;;
+  umount)   cmd_umount ;;
+  broker)   cmd_broker "$@" ;;
+  shell)    cmd_shell "$@" ;;
+  run)      cmd_run "$@" ;;
+  opencode) cmd_opencode "$@" ;;
+  status)   cmd_status ;;
+  paths|config) cmd_paths ;;
+  help|"")  cmd_help ;;
+  *) die "unknown command: $cmd (try: fsbroker help)" ;;
+esac

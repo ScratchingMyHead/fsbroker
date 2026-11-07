@@ -11,13 +11,18 @@ There are two independent things to know about any path:
 Anything not in the mount table simply does not exist inside the sandbox (ENOENT).
 This command prints both, so there is one place to look.
 """
+import argparse
 import os
 import socket
 import sys
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-VROOT_SOCK = os.path.join(ROOT, "run", "vroot.sock")
-BROKER_SOCK = os.path.join(ROOT, "run", "broker.sock")
+
+def run_dir():
+    d = os.environ.get("FSBROKER_RUN_DIR")
+    return d or os.path.join(
+        os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
+        "fsbroker",
+    )
 
 
 def query(sock, line, timeout=5):
@@ -66,11 +71,18 @@ def section(title):
 
 
 def main():
+    ap = argparse.ArgumentParser(description="show the sandbox's current access")
+    ap.add_argument("--run-dir", default=run_dir(),
+                    help="runtime directory (env FSBROKER_RUN_DIR)")
+    args = ap.parse_args()
+    vroot_sock = os.path.join(args.run_dir, "vroot.sock")
+    broker_sock = os.path.join(args.run_dir, "broker.sock")
+
     print("fsbroker — current access")
 
-    mounts = query(VROOT_SOCK, "MOUNTS")
-    vgrants = query(VROOT_SOCK, "LIST")
-    bgrants = query(BROKER_SOCK, "LIST")
+    mounts = query(vroot_sock, "MOUNTS")
+    vgrants = query(vroot_sock, "LIST")
+    bgrants = query(broker_sock, "LIST")
 
     # --- visibility -------------------------------------------------------
     section("VISIBLE — paths that exist inside the sandbox")

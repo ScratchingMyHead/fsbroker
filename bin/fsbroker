@@ -10,6 +10,7 @@
 #   broker start|stop|status
 #   shell                 start a shell inside the sandbox
 #   run [--] <cmd> ...    run a command inside the sandbox
+#   session [--] <cmd>    mount + broker + run, then tear down (no arg: OpenCode)
 #   opencode [args]       run the OpenCode desktop GUI inside the sandbox
 #   status                show what the agent can currently access
 #   paths                 print the resolved locations and exit
@@ -32,6 +33,10 @@ RUN_DIR=${FSBROKER_RUN_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/fsbroker}
 CONFIG=${FSBROKER_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/fsbroker/vroot.toml}
 HOME_HOST=${FSBROKER_HOME:-}
 OPENCODE_BIN=${FSBROKER_OPENCODE_BIN:-/opt/OpenCode/ai.opencode}
+OPENCODE_CLI=${FSBROKER_OPENCODE_CLI:-/opt/OpenCode/resources/opencode-cli}
+# The sandbox shares the host's network namespace, so the OpenCode CLI service
+# inside it must not reuse the host instance's port (default 49374).
+OPENCODE_PORT=${FSBROKER_OPENCODE_PORT:-49474}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -240,9 +245,49 @@ sandbox_exec() { sandbox_args; exec bwrap "${BWRAP_ARGS[@]}" -- "$@"; }
 cmd_shell() { sandbox_exec "${SHELL:-/bin/bash}" "$@"; }
 cmd_run()   { [ $# -gt 0 ] || die "run needs a command"; sandbox_exec "$@"; }
 
+# Mount, start the broker, run something, then tear down again. With no
+# argument it runs the OpenCode GUI. This is the whole-session entry point that
+# a desktop menu item points at.
+cmd_session() {
+  # Global (not `local`): the EXIT trap runs after this function returns, so a
+  # local would already be out of scope under `set -u`.
+  SESSION_UP=0
+  cleanup() {
+    [ "${SESSION_UP:-0}" = 1 ] || return 0
+    cmd_broker stop >/dev/null 2>&1 || true
+    cmd_umount >/dev/null 2>&1 || true
+  }
+  trap cleanup EXIT INT TERM
+  # Refuse a second instance: it could not bind the debug port and would
+  # otherwise tear down the session that is already running.
+  if pgrep -f "remote-debugging-port=933[3]" >/dev/null 2>&1; then
+    die "a sandboxed OpenCode is already running"
+  fi
+  cmd_mount
+  cmd_broker start
+  local i
+  for i in $(seq 1 50); do [ -S "$RUN_DIR/broker.sock" ] && break; sleep 0.1; done
+  SESSION_UP=1
+  local base=("$SELF" --run-dir "$RUN_DIR" --config "$CONFIG" --home "$HOME_HOST")
+  if [ $# -gt 0 ]; then "${base[@]}" run "$@"; else "${base[@]}" opencode; fi
+}
+
 cmd_opencode() {
   [ -x "$OPENCODE_BIN" ] || die "OpenCode binary not found at $OPENCODE_BIN"
-  rm -f "$HOME_HOST/.local/state/opencode/service.json" "$HOME_HOST/.config/opencode/service.json"
+  # The service port is stored in the sandbox home's opencode service.json.
+  # Set it once if it is missing — and never delete that file, or the instance
+  # falls back to the host's port and fails to start.
+  local conf="$HOME_HOST/.config/opencode/service.json"
+  if ! grep -q '"port"' "$conf" 2>/dev/null; then
+    say "setting the sandbox OpenCode service port to $OPENCODE_PORT"
+    HOME="$HOME_HOST" \
+    XDG_CONFIG_HOME="$HOME_HOST/.config" \
+    XDG_DATA_HOME="$HOME_HOST/.local/share" \
+    XDG_STATE_HOME="$HOME_HOST/.local/state" \
+    "$OPENCODE_CLI" service set port "$OPENCODE_PORT" >/dev/null 2>&1 || true
+  fi
+  # Drop only the stale client pointer; the running service rewrites it.
+  rm -f "$HOME_HOST/.local/state/opencode/service.json"
   sandbox_exec "$OPENCODE_BIN" --no-sandbox --disable-gpu --ozone-platform=x11 \
     --remote-debugging-port=9333 "$@"
 }
@@ -256,6 +301,7 @@ case "$cmd" in
   broker)   cmd_broker "$@" ;;
   shell)    cmd_shell "$@" ;;
   run)      cmd_run "$@" ;;
+  session)  cmd_session "$@" ;;
   opencode) cmd_opencode "$@" ;;
   status)   cmd_status ;;
   paths|config) cmd_paths ;;

@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""One view of everything the sandboxed agent can currently access.
+
+There are two independent things to know about any path:
+
+  * can it be SEEN?      the daemon's live mount table
+                         (permanent config from vroot.toml + this session's requests)
+  * may it be CHANGED?   write approvals that let a mutation through with no prompt
+                         (the prompt broker's grants + the daemon's operator grants)
+
+Anything not in the mount table simply does not exist inside the sandbox (ENOENT).
+This command prints both, so there is one place to look.
+"""
+import os
+import socket
+import sys
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+VROOT_SOCK = os.path.join(ROOT, "run", "vroot.sock")
+BROKER_SOCK = os.path.join(ROOT, "run", "broker.sock")
+
+
+def query(sock, line, timeout=5):
+    if not os.path.exists(sock):
+        return None
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(sock)
+        s.sendall(line.encode() + b"\n")
+        chunks = []
+        while True:
+            b = s.recv(65536)
+            if not b:
+                break
+            chunks.append(b)
+    except OSError:
+        return None
+    finally:
+        s.close()
+    return b"".join(chunks).decode(errors="replace").splitlines()
+
+
+def parse_mounts(lines):
+    out = []
+    for ln in lines[1:]:
+        p = ln.split(" ", 4)
+        if len(p) == 5 and p[0] == "mount":
+            out.append(p[1:])  # access, source, vpath, host
+    return out
+
+
+def parse_grants(lines):
+    out = []
+    for ln in lines[1:]:
+        if ln.startswith("grant "):
+            _, scope, path = ln.split(" ", 2)
+            out.append((scope, path))
+    return out
+
+
+def section(title):
+    print()
+    print(title)
+    print("-" * max(len(title), 40))
+
+
+def main():
+    print("fsbroker — current access")
+
+    mounts = query(VROOT_SOCK, "MOUNTS")
+    vgrants = query(VROOT_SOCK, "LIST")
+    bgrants = query(BROKER_SOCK, "LIST")
+
+    # --- visibility -------------------------------------------------------
+    section("VISIBLE — paths that exist inside the sandbox")
+    if mounts is None:
+        print("  (daemon not running — nothing is mounted)")
+    else:
+        rows = parse_mounts(mounts)
+        # config first, then this session's requests, each alphabetical
+        rows.sort(key=lambda r: (r[1] != "config", r[2]))
+        w = max((len(r[2]) for r in rows), default=4)
+        for access, source, vpath, host in rows:
+            src = "config        " if source == "config" else "session request"
+            note = "" if source == "config" else f"   (-> {host})"
+            print(f"  {vpath:<{w}}  {access:<2}  {src}{note}")
+
+    # --- write approvals --------------------------------------------------
+    section("WRITE APPROVALS — modifications allowed with no prompt")
+    grants = []
+    if bgrants is not None:
+        grants += [("broker", s, p) for s, p in parse_grants(bgrants)]
+    if vgrants is not None:
+        grants += [("daemon", s, p) for s, p in parse_grants(vgrants)]
+    if not grants:
+        if vgrants is None and bgrants is None:
+            print("  (neither daemon nor broker is running)")
+        else:
+            print("  (none — every write to a read-only path prompts)")
+    else:
+        w = max(len(p) for _, _, p in grants)
+        for where, scope, path in sorted(grants, key=lambda g: (g[2], g[0])):
+            print(f"  {where:<7} {scope:<12} {path}")
+
+    print()
+    print("Notes: config = permanent (vroot.toml). session request = approved this run.")
+    print("       Anything not listed above is ENOENT to the agent.")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Host-side client for the vroot control socket.
+
+Usage:
+  vrootctl list
+  vrootctl grant <once|session> <absolute path>
+  vrootctl revoke <absolute path>
+  vrootctl clear
+  vrootctl ping
+
+The socket is host-only; it is not mounted into the sandbox, so this script
+is the way an operator (or the Phase 3 broker) widens a grant.
+"""
+import os
+import socket
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+SOCK = os.environ.get("VROOT_SOCK", os.path.join(ROOT, "run", "vroot.sock"))
+
+USAGE = """usage: vrootctl <command>
+
+  list                                             active write grants
+  mounts                                           the live mount table
+  grant <once|session|timed:seconds> <abs path>
+  revoke <absolute path>
+  clear
+  ping
+"""
+
+
+def send(line):
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(SOCK)
+    except OSError as e:
+        sys.exit(f"vrootctl: cannot connect to {SOCK}: {e}")
+    try:
+        s.sendall(line.encode() + b"\n")
+        chunks = []
+        while True:
+            b = s.recv(4096)
+            if not b:
+                break
+            chunks.append(b)
+        return b"".join(chunks).decode(errors="replace")
+    finally:
+        s.close()
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(USAGE, end="")
+        return 0
+
+    cmd = argv[0]
+    if cmd == "list":
+        line = "LIST"
+    elif cmd == "mounts":
+        line = "MOUNTS"
+    elif cmd == "ping":
+        line = "PING"
+    elif cmd == "clear":
+        line = "CLEAR"
+    elif cmd == "grant":
+        if len(argv) != 3 or argv[1] not in ("once", "session"):
+            sys.exit("vrootctl: grant needs <once|session> <absolute path>\n" + USAGE)
+        path = argv[2]
+        if not path.startswith("/"):
+            sys.exit("vrootctl: path must be absolute")
+        line = f"GRANT {argv[1]} {path}"
+    elif cmd == "revoke":
+        if len(argv) != 2:
+            sys.exit("vrootctl: revoke needs <absolute path>\n" + USAGE)
+        if not argv[1].startswith("/"):
+            sys.exit("vrootctl: path must be absolute")
+        line = f"REVOKE {argv[1]}"
+    else:
+        sys.exit(f"vrootctl: unknown command {cmd!r}\n" + USAGE)
+
+    out = send(line)
+    sys.stdout.write(out)
+    return 0 if out.startswith("OK") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

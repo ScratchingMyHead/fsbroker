@@ -1,0 +1,89 @@
+# Phase 2 virtual root: deny-by-default, identity paths.
+#
+# Every [[mount]] without virtual_path appears inside the sandbox at the same
+# absolute path it has on the host. The parent directories are synthetic and
+# list only what was added, so the tree behaves like a chroot over a selected
+# set of real folders rather than a remapping.
+
+mount_point = "/home/rj/fsbroker/run/vroot"
+allow_other = false
+read_only = false
+
+# --- the agent's own writable home -----------------------------------------
+# The one path that does not exist on the host. Keeping it distinct means it
+# can never be confused with the real /home/rj.
+[[mount]]
+virtual_path = "/home/agent"
+host = "/home/rj/fsbroker/prototype/phase1/demo/home"
+writable = true
+
+# --- real folders, at their real paths --------------------------------------
+# The test project. On this host the same path works inside and outside:
+#   cd /home/rj/fsbroker/prototype/phase1/demo/project
+#
+# To work on the real workspace instead, add:
+#   [[mount]]
+#   host = "/home/rj/su"
+#   writable = true
+[[mount]]
+host = "/home/rj/fsbroker/prototype/phase1/demo/project"
+writable = true
+
+# --- read-only user data ----------------------------------------------------
+# Visible at their real paths, read-only by default: the agent can read them
+# but cannot change anything. Escalation to write is the broker's job (Phase 3).
+[[mount]]
+host = "/home/rj/su"
+
+[[mount]]
+host = "/home/rj/.config"
+
+# A symlink to /mnt/media2/src. The host path is resolved (canonicalized) when
+# the daemon loads, but the visible path stays the one written here, so inside
+# the sandbox it appears at /home/rj/src. Read-only, like the other user data.
+[[mount]]
+host = "/home/rj/src"
+
+# --- read-only runtime ------------------------------------------------------
+[[mount]]
+host = "/usr"
+
+[[mount]]
+host = "/bin"
+
+[[mount]]
+host = "/sbin"
+
+[[mount]]
+host = "/lib"
+
+[[mount]]
+host = "/lib64"
+
+[[mount]]
+host = "/opt/OpenCode"
+
+# Assembled by setup.sh from the small subset of host /etc that the GUI and
+# the dynamic linker need. The host /etc is not mapped wholesale, so /etc/shadow
+# and host keys do not exist in the sandbox.
+[[mount]]
+virtual_path = "/etc"
+host = "/home/rj/fsbroker/prototype/phase2/etc-view"
+
+# Placeholders so bubblewrap can mount its own /proc, /dev, /tmp and /run on
+# top of them. They are empty inside the virtual root.
+[[mount]]
+virtual_path = "/proc"
+host = "/home/rj/fsbroker/prototype/phase2/placeholders/proc"
+
+[[mount]]
+virtual_path = "/dev"
+host = "/home/rj/fsbroker/prototype/phase2/placeholders/dev"
+
+[[mount]]
+virtual_path = "/tmp"
+host = "/home/rj/fsbroker/prototype/phase2/placeholders/tmp"
+
+[[mount]]
+virtual_path = "/run"
+host = "/home/rj/fsbroker/prototype/phase2/placeholders/run"

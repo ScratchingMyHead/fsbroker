@@ -1,0 +1,17 @@
+[package]
+name = "vroot"
+version = "0.1.0"
+edition = "2021"
+description = "Deny-by-default FUSE virtual root for the fsbroker prototype"
+
+[dependencies]
+anyhow = "1"
+env_logger = "0.11"
+fuser = "0.14"
+libc = "0.2"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[profile.release]
+opt-level = 2

@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""Ask the broker to add a folder to the sandbox (run from inside it).
+
+    fsbroker-request <absolute path> [--write]
+
+Sends the request to the daemon's request socket, which forwards it to the
+broker. Nothing is added unless the user approves; the answer is printed and
+the exit status is 0 when the request was approved.
+"""
+import os
+import socket
+import sys
+
+SOCK = os.environ.get(
+    "FSBROKER_REQUEST_SOCKET", "/run/user/1000/fsbroker-request.sock"
+)
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__, end="")
+        return 0 if argv else 2
+    path = argv[0]
+    writable = "--write" in argv[1:]
+    if not path.startswith("/"):
+        sys.exit("fsbroker-request: path must be absolute")
+
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(SOCK)
+    except OSError as e:
+        sys.exit(f"fsbroker-request: cannot reach the request socket: {e}")
+
+    s.sendall(f"REQUEST {path} {'rw' if writable else 'ro'}\n".encode())
+    chunks = []
+    while True:
+        b = s.recv(4096)
+        if not b:
+            break
+        chunks.append(b)
+    s.close()
+
+    out = b"".join(chunks).decode(errors="replace")
+    sys.stdout.write(out)
+    return 0 if out.startswith("OK") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

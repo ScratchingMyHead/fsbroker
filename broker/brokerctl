@@ -2,32 +2,36 @@
 """Host-side client for the fsbroker prompt broker.
 
 Usage:
-  brokerctl ping
-  brokerctl list
-  brokerctl grant <always|timed:seconds> <absolute path>
-  brokerctl revoke <absolute path>
-  brokerctl clear
-  brokerctl ask <op> <pid> <uid> <absolute path> [<path>...]
+  brokerctl [--run-dir <dir>] ping
+  brokerctl [--run-dir <dir>] list
+  brokerctl [--run-dir <dir>] grant <always|session|timed:seconds> <absolute path>
+  brokerctl [--run-dir <dir>] revoke <absolute path>
+  brokerctl [--run-dir <dir>] clear
+  brokerctl [--run-dir <dir>] ask <op> <pid> <uid> <absolute path> [<path>...]
+
+The socket defaults to <run-dir>/broker.sock, where the run dir comes from
+--run-dir, then $FSBROKER_RUN_DIR, then $XDG_STATE_HOME/fsbroker.
 """
 import os
 import socket
 import sys
 
-RUN_DIR = os.environ.get("FSBROKER_RUN_DIR") or os.path.join(
-    os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
-    "fsbroker",
-)
-SOCK = os.environ.get("FSBROKER_SOCK", os.path.join(RUN_DIR, "broker.sock"))
-
 USAGE = __doc__
 
 
-def send(line):
+def default_run_dir():
+    return os.environ.get("FSBROKER_RUN_DIR") or os.path.join(
+        os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
+        "fsbroker",
+    )
+
+
+def send(sock, line):
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.connect(SOCK)
+        s.connect(sock)
     except OSError as e:
-        sys.exit(f"brokerctl: cannot connect to {SOCK}: {e}")
+        sys.exit(f"brokerctl: cannot connect to {sock}: {e}")
     try:
         s.sendall(line.encode() + b"\n")
         chunks = []
@@ -42,6 +46,31 @@ def send(line):
 
 
 def main(argv):
+    # Pull --run-dir/--socket out wherever they appear.
+    run_dir = default_run_dir()
+    sock = os.environ.get("FSBROKER_SOCK")
+    rest = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--run-dir" and i + 1 < len(argv):
+            run_dir = argv[i + 1]
+            i += 2
+        elif a.startswith("--run-dir="):
+            run_dir = a.split("=", 1)[1]
+            i += 1
+        elif a == "--socket" and i + 1 < len(argv):
+            sock = argv[i + 1]
+            i += 2
+        elif a.startswith("--socket="):
+            sock = a.split("=", 1)[1]
+            i += 1
+        else:
+            rest.append(a)
+            i += 1
+    argv = rest
+    sock = sock or os.path.join(run_dir, "broker.sock")
+
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(USAGE, end="")
         return 0
@@ -51,7 +80,7 @@ def main(argv):
         line = cmd.upper()
     elif cmd == "grant":
         if len(argv) != 3 or not argv[2].startswith("/"):
-            sys.exit("brokerctl: grant needs <always|timed:seconds> <absolute path>")
+            sys.exit("brokerctl: grant needs <always|session|timed:seconds> <absolute path>")
         line = f"GRANT {argv[1]} {argv[2]}"
     elif cmd == "revoke":
         if len(argv) != 2 or not argv[1].startswith("/"):
@@ -64,7 +93,7 @@ def main(argv):
     else:
         sys.exit(f"brokerctl: unknown command {cmd!r}\n{USAGE}")
 
-    out = send(line)
+    out = send(sock, line)
     sys.stdout.write(out)
     return 0 if out.startswith("OK") or out.startswith("ALLOW") else 1
 

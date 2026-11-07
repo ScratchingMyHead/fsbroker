@@ -13,6 +13,7 @@
 #   session [--] <cmd>    mount + broker + run, then tear down (no arg: OpenCode)
 #   opencode [args]       run the OpenCode desktop GUI inside the sandbox
 #   status                show what the agent can currently access
+#   approvals [cmd...]    the broker's remembered write approvals (default: list)
 #   paths                 print the resolved locations and exit
 #   help
 #
@@ -190,6 +191,11 @@ cmd_broker() {
 
 cmd_status() { exec "$REPO/bin/fsbroker-status" --run-dir "$RUN_DIR"; }
 
+# The broker's write approvals (the ones the prompt creates and remembers).
+cmd_approvals() {
+  exec "$REPO/broker/brokerctl" --run-dir "$RUN_DIR" "${@:-list}"
+}
+
 cmd_paths() {
   cat <<EOF
 repo          $REPO
@@ -304,6 +310,7 @@ case "$cmd" in
   session)  cmd_session "$@" ;;
   opencode) cmd_opencode "$@" ;;
   status)   cmd_status ;;
+  approvals) cmd_approvals "$@" ;;
   paths|config) cmd_paths ;;
   help|"")  cmd_help ;;
   *) die "unknown command: $cmd (try: fsbroker help)" ;;

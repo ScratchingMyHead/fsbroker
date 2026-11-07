@@ -77,8 +77,14 @@ bin/fsbroker --run-dir ~/fsbroker_opencode session      # mount + broker + the a
 bin/fsbroker --run-dir ~/fsbroker_opencode shell        # a shell inside the sandbox
 bin/fsbroker --run-dir ~/fsbroker_opencode run ls /     # one command inside
 bin/fsbroker --run-dir ~/fsbroker_opencode status       # what the agent can access
+bin/fsbroker --run-dir ~/fsbroker_opencode approvals    # remembered write approvals
 bin/fsbroker --run-dir ~/fsbroker_opencode paths        # resolved locations
 ```
+
+`approvals` also takes `grant <always|session|timed:seconds> <path>`, `revoke
+<path>` and `clear`, so you can pre-authorise a write without waiting for a
+prompt. (The lower-level client is `broker/brokerctl`, which needs `--run-dir`
+or `FSBROKER_RUN_DIR`.)
 
 `session` with no argument launches the OpenCode desktop GUI; give it a command
 to run that instead:

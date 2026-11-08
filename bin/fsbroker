@@ -60,6 +60,11 @@ LOG_DIR="$RUN_DIR/log"
 HOST_USER=${HOST_USER:-$(id -un)}
 HOST_USER_HOME=$(getent passwd "$HOST_USER" | cut -d: -f6)
 DISPLAY=${DISPLAY:-:0}
+# The sandbox gets its own UTS namespace, but with the host's name: a different
+# hostname makes X set WM_CLIENT_MACHINE to it, and the panel then treats the
+# window as remote and refuses to match it to its icon. Override to restore a
+# distinct sandbox hostname.
+HOST_HOSTNAME=${FSBROKER_HOSTNAME:-$(hostname 2>/dev/null || echo opencode-sandbox)}
 
 say()  { printf 'fsbroker: %s\n' "$*"; }
 die()  { printf 'fsbroker: %s\n' "$*" >&2; exit 1; }
@@ -217,7 +222,7 @@ sandbox_args() {
   [ -S "$RUN_DIR/request.sock" ] || die "request socket missing; is the daemon running?"
   BWRAP_ARGS=(
     --unshare-all --share-net --die-with-parent --new-session
-    --hostname opencode-sandbox --cap-drop ALL
+    --hostname "$HOST_HOSTNAME" --cap-drop ALL
     --bind "$MOUNT" /
     --proc /proc --dev /dev
     --bind "$RUN_DIR/tmp" /tmp

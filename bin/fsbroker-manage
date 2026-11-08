@@ -17,6 +17,9 @@ import sys
 import gi
 
 gi.require_version("Gtk", "3.0")
+# Gdk must be pinned too: the import list below is evaluated left to right, so
+# without this it resolves to Gdk 4.0 and then clashes with Gtk 3.0.
+gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gtk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

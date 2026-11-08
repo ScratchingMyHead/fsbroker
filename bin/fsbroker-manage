@@ -89,9 +89,16 @@ class Manager(Gtk.Window):
         for row, (key, heading) in enumerate(SECTIONS):
             frame = Gtk.Frame(label=heading)
             frame.set_vexpand(True)
+            # A grid column is only as wide as its content unless a child asks
+            # to expand, so without this the panes hug their text.
+            frame.set_hexpand(True)
             scroller = Gtk.ScrolledWindow()
             scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+            # Overlay scrollbars hide themselves, which reads as "clipped" when
+            # a list is longer than its pane.
+            scroller.set_overlay_scrolling(False)
             grid = Gtk.Grid(column_spacing=12, row_spacing=4, margin=6)
+            grid.set_hexpand(True)
             scroller.add(grid)
             frame.add(scroller)
             panes.attach(frame, 0, row, 1, 1)
@@ -160,7 +167,10 @@ class Manager(Gtk.Window):
             kind, target = remove
             button = Gtk.Button(label="Remove")
             button.connect("clicked", lambda *_: self.on_remove(kind, target))
+            # Expand the button's cell so it takes the slack and the button sits
+            # at the right edge, with the path left-aligned.
             cell = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+            cell.set_hexpand(True)
             cell.pack_end(button, False, False, 0)
             grid.attach(cell, len(cells), row, 1, 1)
 

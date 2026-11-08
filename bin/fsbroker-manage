@@ -10,16 +10,52 @@ config file can take those away.
     fsbroker-manage [--run-dir <dir>]
 """
 import argparse
+import json
 import os
 import sys
 
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk
+from gi.repository import Gdk, Gtk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fsbroker_proto as proto
+
+# (key, heading) — the three panes, in order, each an equal share of the window.
+SECTIONS = (
+    ("mounts", "VISIBLE"),
+    ("allows", "WRITE APPROVALS"),
+    ("denies", "DENIALS"),
+)
+
+
+def geometry_path():
+    base = os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
+    return os.path.join(base, "fsbroker", "manage-window.json")
+
+
+def load_geometry():
+    try:
+        with open(geometry_path()) as f:
+            geo = json.load(f)
+        return geo if isinstance(geo, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_geometry(window):
+    try:
+        x, y = window.get_position()
+        w, h = window.get_size()
+        path = geometry_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"x": x, "y": y, "w": w, "h": h}, f)
+        os.replace(tmp, path)
+    except (OSError, ValueError):
+        pass
 
 
 class Manager(Gtk.Window):
@@ -30,27 +66,32 @@ class Manager(Gtk.Window):
         self.broker_sock = os.path.join(run_dir, "broker.sock")
         self.busy = False
 
-        self.set_default_size(900, -1)
-        self.set_border_width(12)
-        self.connect("destroy", Gtk.main_quit)
+        self.set_border_width(10)
+        self.connect("destroy", self.on_destroy)
+        self._restore_geometry()
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        self.add(box)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.add(outer)
 
         self.header = Gtk.Label(xalign=0)
         self.header.set_selectable(True)
-        box.add(self.header)
+        outer.add(self.header)
+
+        # Equal thirds, each scrolling on its own, all growing with the window.
+        panes = Gtk.Grid(row_homogeneous=True)
+        panes.set_vexpand(True)
+        outer.add(panes)
 
         self.grids = {}
-        for key, title in (
-            ("mounts", "VISIBLE — what exists inside the sandbox"),
-            ("allows", "WRITE APPROVALS — allowed with no prompt"),
-            ("denies", "DENIALS — refused with no prompt"),
-        ):
-            frame = Gtk.Frame(label=title)
-            grid = Gtk.Grid(column_spacing=12, row_spacing=4, margin=8)
-            frame.add(grid)
-            box.add(frame)
+        for row, (key, heading) in enumerate(SECTIONS):
+            frame = Gtk.Frame(label=heading)
+            frame.set_vexpand(True)
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+            grid = Gtk.Grid(column_spacing=12, row_spacing=4, margin=6)
+            scroller.add(grid)
+            frame.add(scroller)
+            panes.attach(frame, 0, row, 1, 1)
             self.grids[key] = grid
 
         buttons = Gtk.ButtonBox(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -61,10 +102,44 @@ class Manager(Gtk.Window):
         refresh.connect("clicked", lambda *_: self.populate())
         buttons.add(close)
         buttons.add(refresh)
-        box.add(buttons)
+        outer.add(buttons)
 
         self.populate()
         self.show_all()
+
+    # ---- geometry -----------------------------------------------------
+
+    def _restore_geometry(self):
+        geo = load_geometry()
+        w, h = geo.get("w"), geo.get("h")
+        if w and h:
+            self.set_default_size(int(w), int(h))
+        else:
+            self.set_default_size(900, 600)
+        x, y = geo.get("x"), geo.get("y")
+        if x is None or y is None:
+            return
+        try:
+            display = Gdk.Display.get_default()
+            monitor = (display.get_monitor_at_point(x, y)
+                       or display.get_primary_monitor() or display.get_monitor(0))
+            area = monitor.get_geometry()
+            # Keep it on a screen that currently exists, even if the saved one
+            # is gone (a monitor was unplugged, the layout changed).
+            x = min(max(x, area.x), area.x + max(0, area.width - 120))
+            y = min(max(y, area.y), area.y + max(0, area.height - 120))
+            self.move(x, y)
+        except Exception:
+            pass
+
+    def on_destroy(self, *_):
+        save_geometry(self)
+        # Several sessions means several windows; only the last one closes the
+        # application.
+        others = [w for w in Gtk.Window.list_toplevels()
+                  if isinstance(w, Manager) and w is not self]
+        if not others:
+            Gtk.main_quit()
 
     # ---- rendering ----------------------------------------------------
 
@@ -101,7 +176,7 @@ class Manager(Gtk.Window):
         daemon_up = mounts is not None
         broker_up = broker_rules is not None
         self.header.set_text(
-            f"run dir: {self.run_dir}\n"
+            f"run dir: {self.run_dir}    "
             f"daemon: {'running' if daemon_up else 'not running'}    "
             f"broker: {'running' if broker_up else 'not running'}")
 
@@ -128,7 +203,7 @@ class Manager(Gtk.Window):
 
         grid = self.grids["allows"]
         if not allows:
-            self.note(grid, 0, "(none — every write to a read-only path prompts)")
+            self.note(grid, 0, "(none)")
         else:
             for row, (source, scope, path) in enumerate(
                     sorted(allows, key=lambda r: r[2])):

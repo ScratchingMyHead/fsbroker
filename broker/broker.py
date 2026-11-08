@@ -260,8 +260,8 @@ def mount_roots(run_dir):
     except (OSError, ValueError, ImportError):
         return []
     # The daemon names paths the way the sandbox sees them, so the cap uses
-    # virtual_path (which equals host for identity mappings, and differs for
-    # e.g. /etc, built from the run directory's etc-view).
+    # virtual_path, which equals host for identity mappings and differs only
+    # where a mount is placed somewhere else.
     roots = []
     for m in cfg.get("mount", []):
         v = m.get("virtual_path") or m.get("host")

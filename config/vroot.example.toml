@@ -38,12 +38,17 @@ host = "/lib64"
 [[mount]]
 host = "/opt/OpenCode"
 
-# A curated /etc (built from the safe subset of the host /etc) so the dynamic
-# linker, fonts and TLS work. Generated into the run dir, so host /etc/shadow
-# and host keys never appear.
+# The real /etc, read-only. The sandbox runs as your uid, so this shows exactly
+# what you can already read: /etc/shadow, /etc/sudoers, /etc/ssl/private and the
+# like are root-only and stay unreadable. What it buys is the real thing instead
+# of a curated copy, which matters because copies go stale — a missing
+# /etc/alternatives breaks every symlink chain through it (libblas, lapack,
+# anything update-alternatives manages).
+#
+# A few files are still overridden, by binds in `bin/fsbroker`: passwd and group
+# (so the sandbox user's home is /home/agent), hostname, hosts and machine-id.
 [[mount]]
-virtual_path = "/etc"
-host = "${run}/etc-view"
+host = "/etc"
 
 # Real user data, read-only by default. Writes escalate to the broker.
 # [[mount]]
@@ -65,3 +70,22 @@ host = "${run}/placeholders/tmp"
 [[mount]]
 virtual_path = "/run"
 host = "${run}/placeholders/run"
+
+# --- pass-throughs ---------------------------------------------------------
+# Host objects bound into the sandbox as-is, after the virtual root. These are
+# for things the vroot cannot serve: it can show a unix socket's name, but
+# connect() through it fails, because the kernel needs a real socket inode, and
+# device nodes are the same. They also live under /run and /dev, which are built
+# by bubblewrap rather than mapped.
+#
+# The ones a desktop normally needs are built in (the PipeWire/Pulse socket,
+# /dev/snd for ALSA, and systemd-resolved's resolv.conf, which /etc/resolv.conf
+# points into). Add more here; `dev = true` binds a device node.
+#
+# [[pass]]
+# host = "/run/user/1000/pipewire-0"
+# [[pass]]
+# host = "/dev/snd"
+# dev = true
+# [[pass]]
+# host = "/run/user/1000/bus"        # the session D-Bus: a big capability

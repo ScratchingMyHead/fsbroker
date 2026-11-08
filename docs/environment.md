@@ -22,6 +22,11 @@ Other relevant facts:
 
 - `/dev/dri/card1` and `renderD128` exist (GPU available).
 - The X11 socket is `/tmp/.X11-unix/X0`; the cookie is `/home/rj/.Xauthority`.
+- Audio is PipeWire with `pipewire-pulse`. The sockets are
+  `/run/user/1000/pipewire-0` (and `pipewire-0-manager`) and
+  `/run/user/1000/pulse/native`; `/dev/snd/*` is `root:audio` and access is
+  granted to the logged-in user by ACL. `/etc/resolv.conf` is a symlink into
+  `/run/systemd/resolve/`, which is why DNS needs that path passed through too.
 - `exiftool`-style desktop integration is not required for the prototype.
 - No Docker/Podman socket was observed as part of the agent environment.
 - The host `/home/rj/su` working tree is unrelated to this project; the project

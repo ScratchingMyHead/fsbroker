@@ -166,9 +166,12 @@ any other agent that can run shell commands.
 - **Deny by default.** A path exists only if it is a configured mount, a
   descendant of one, or a synthetic directory that is an ancestor of one.
   Everything else is `ENOENT`; there is no fallback to the host root.
-- **The kernel does the confinement.** Every host access resolves under the
+- **The kernel does the confinement.** Each host access resolves under its
   mapping's directory fd with `openat2(..., RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS)`,
-  so absolute symlinks, `..` and `/proc/self/root` are clamped to the mapping.
+  so `..`, absolute targets and `/proc/self/root` cannot escape that mapping's
+  subtree on the host. Symlink targets are followed in the sandbox's own tree,
+  which is what lets a link point into another mapping (how `/etc/alternatives`
+  resolves) while an unmapped host path stays unreachable.
 - **Writability is per mount, or per runtime grant.** Read-only mounts refuse
   every mutation; a runtime grant (from `vrootctl`, or the broker) widens that
   for a path prefix. When a broker is configured the daemon reports real mode
@@ -185,6 +188,31 @@ Inside `vroot/src`: `config.rs` (mapping + live mount table), `fs.rs` (the FUSE
 filesystem), `policy.rs` (runtime grants), `ctl.rs` (host-only control socket),
 `req.rs` (sandbox request socket), `broker.rs` (prompt-broker client), `sys.rs`
 (`openat2`/`stat`/`getdents64`).
+
+## Real files, and the two exceptions
+
+The virtual root serves the host's own files; nothing is copied, so nothing can
+go stale. Two things need more than a mapping, and both are visible in the
+config:
+
+- **A few `/etc` files are bound over the real `/etc`** — `passwd` and `group`
+  (so the sandbox user's home is `/home/agent`), `hostname`, `hosts` and
+  `machine-id`. Everything else is the host's own `/etc`, read-only. That is
+  safe because the sandbox's uid is yours: `/etc/shadow`, `/etc/sudoers` and
+  `/etc/ssl/private` are root-only, so they stay unreadable either way. It is
+  also more correct than a curated copy, which breaks whatever it forgets — a
+  missing `/etc/alternatives` leaves every library symlink through it dangling
+  (`libblas`, `lapack`, anything `update-alternatives` manages).
+- **Pass-throughs** bind real host objects into the sandbox where a filesystem
+  cannot help: unix sockets and device nodes. The daemon can show a socket's
+  name, but `connect()` through it fails, because the kernel needs a real socket
+  inode, and devices are the same. They also live under `/run` and `/dev`, which
+  bubblewrap builds rather than mounts. The ones a desktop needs are on by
+  default — the PipeWire/Pulse socket, `/dev/snd`, and systemd-resolved's
+  `resolv.conf`, which `/etc/resolv.conf` points into — and `[[pass]]` adds
+  more (see the example config). Note what the audio ones include: the same
+  socket allows recording, and `/dev/snd` is raw hardware access that bypasses
+  the sound server.
 
 ## Known limitations
 

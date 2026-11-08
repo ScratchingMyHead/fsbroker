@@ -24,7 +24,7 @@
 #
 # The run directory holds: mount/ (the FUSE mount point), the *.sock files,
 # *.pid, broker-state.json, audit.log, log/, home/ (the sandbox home), and the
-# generated etc-view/ and placeholders/.
+# generated etc-overrides/ and placeholders/.
 set -uo pipefail
 
 SELF=$(readlink -f -- "${BASH_SOURCE[0]}")
@@ -86,8 +86,13 @@ prepare_run_dir() {
   chmod 1777 "$RUN_DIR/tmp" "$RUN_DIR/shm"
 }
 
-make_etc_view() {
-  local etc="$RUN_DIR/etc-view"
+# The handful of /etc files the sandbox must see differently from the host. The
+# real /etc is mounted read-only (see the config) and these are bound over the
+# top of it. Only identity and the sandbox user's home are overridden; anything
+# else is the host's own file, so a curated copy cannot go stale (a missing
+# /etc/alternatives, say, breaks every symlink chain into it).
+make_etc_overrides() {
+  local etc="$RUN_DIR/etc-overrides"
   rm -rf "$etc"; mkdir -p "$etc"
   local uid gid; uid=$(id -u "$HOST_USER"); gid=$(id -g "$HOST_USER")
   cat > "$etc/passwd" <<EOF
@@ -98,28 +103,52 @@ EOF
 root:x:0:
 $HOST_USER:x:$gid:
 EOF
-  cat > "$etc/nsswitch.conf" <<'EOF'
-passwd: files
-group: files
-shadow: files
-hosts: files dns
-networks: files
-EOF
   printf '%s\n' "$HOST_HOSTNAME" > "$etc/hostname"
   cat > "$etc/hosts" <<EOF
 127.0.0.1 localhost $HOST_HOSTNAME
 ::1 localhost ip6-localhost ip6-loopback
 EOF
   printf '0123456789abcdef0123456789abcdef\n' > "$etc/machine-id"
-  local f
-  for f in ssl fonts ld.so.cache ld.so.conf ld.so.conf.d xdg os-release \
-           localtime mime.types gtk-3.0 drirc resolv.conf; do
-    local src="/etc/$f" dest="$etc/$f"
-    [ -e "$src" ] || continue
-    mkdir -p "$(dirname "$dest")"
-    if [ -d "$src" ]; then cp -rL --preserve=mode,timestamps "$src/." "$dest/" 2>/dev/null || true
-    else cp -L --preserve=mode,timestamps "$src" "$dest" 2>/dev/null || true; fi
-  done
+}
+
+# Host objects that must be the real thing, bound in after the virtual root.
+# Sockets and device nodes cannot be served through FUSE at all — the kernel
+# needs a real socket or device inode, so a relaying filesystem can only show
+# the name (connect() through the vroot fails) — and they sit under /run and
+# /dev, which are built here rather than mapped. This is the same treatment X11
+# and the request socket already get.
+default_passthroughs() {
+  local xdg=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+  printf '%s\n' \
+    "ro $xdg/pulse" \
+    "ro $xdg/pipewire-0" \
+    "ro $xdg/pipewire-0-manager" \
+    "dev /dev/snd" \
+    "ro /run/systemd/resolve/stub-resolv.conf" \
+    "ro /run/systemd/resolve/resolv.conf"
+}
+
+# Extra pass-throughs from the config: `[[pass]]` with `host`, optional
+# `dev = true` for device nodes. Parsed here because bwrap's arguments are built
+# before the daemon ever sees the config.
+config_passthroughs() {
+  [ -f "$RESOLVED" ] || return 0
+  python3 - "$RESOLVED" <<'PY'
+import sys
+try:
+    import tomllib
+except ImportError:
+    sys.exit(0)
+try:
+    with open(sys.argv[1], "rb") as f:
+        cfg = tomllib.load(f)
+except (OSError, ValueError):
+    sys.exit(0)
+for entry in cfg.get("pass", []):
+    host = entry.get("host")
+    if host:
+        print(("dev" if entry.get("dev") else "ro") + " " + host)
+PY
 }
 
 ensure_daemon_built() {
@@ -156,7 +185,7 @@ cmd_mount() {
   fi
   if mount_entry; then fusermount3 -uz "$MOUNT" 2>/dev/null || umount -l "$MOUNT" 2>/dev/null || true; fi
   prepare_run_dir
-  make_etc_view
+  make_etc_overrides
   resolve_config
   # `allow_other` lets a different uid (root, via `fsbroker root-shell`) use the
   # mount. Unprivileged FUSE refuses that unless /etc/fuse.conf allows it, and
@@ -265,6 +294,28 @@ sandbox_args() {
   for v in OPENROUTER_API_KEY VLLM_API_KEY; do
     [ -n "${!v:-}" ] && BWRAP_ARGS+=(--setenv "$v" "${!v}")
   done
+
+  # The real /etc is a vroot mount; these few files are bound over it. Guarded
+  # on existence so a run dir mounted before this existed still works.
+  local f
+  for f in passwd group hostname hosts machine-id; do
+    local src="$RUN_DIR/etc-overrides/$f"
+    if [ -e "$src" ]; then
+      BWRAP_ARGS+=(--ro-bind "$src" "/etc/$f")
+    fi
+  done
+
+  # Real host objects that FUSE cannot proxy (sockets, devices).
+  local kind path
+  while read -r kind path; do
+    [ -n "$path" ] || continue
+    [ -e "$path" ] || continue
+    if [ "$kind" = dev ]; then
+      BWRAP_ARGS+=(--dev-bind "$path" "$path")
+    else
+      BWRAP_ARGS+=(--ro-bind "$path" "$path")
+    fi
+  done < <(default_passthroughs; config_passthroughs)
 }
 
 sandbox_exec() { sandbox_args; exec bwrap "${BWRAP_ARGS[@]}" -- "$@"; }

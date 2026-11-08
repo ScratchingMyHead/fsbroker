@@ -11,8 +11,9 @@ for unmapped paths and the display-isolation prerequisite below.
 |---|---|---|
 | `/home/agent` (agent home) | yes | read-write (scratch space, not user data) |
 | `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/opt/OpenCode` | yes | read-only |
-| `/etc` snapshot | yes | read-only |
+| `/etc` (the host's own) | yes | read-only, with a few files bound over it |
 | `/proc`, `/dev`, `/tmp`, `/run`, `/dev/shm` | yes | runtime, added by bwrap |
+| pass-throughs (sockets, `/dev/snd`) | yes | bound in as-is; see `[[pass]]` |
 | any directory the user adds | yes | **read-only unless `writable = true`** |
 | everything else | no (`ENOENT`) | — |
 

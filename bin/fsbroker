@@ -142,7 +142,18 @@ cmd_build() {
 
 cmd_mount() {
   ensure_daemon_built
-  if is_mounted; then say "already mounted at $MOUNT"; return 0; fi
+  if is_mounted; then
+    # Reusing a live mount is intentional (mount + session), but it means the
+    # resolved config on disk is whatever the existing daemon was started with.
+    # Config edits would then look applied while having no effect, so say so.
+    if [ "$CONFIG" -nt "$RESOLVED" ]; then
+      say "already mounted at $MOUNT, but $CONFIG changed since that mount"
+      say "the running mount still uses the old config; to apply it: fsbroker umount (then start again)"
+    else
+      say "already mounted at $MOUNT"
+    fi
+    return 0
+  fi
   if mount_entry; then fusermount3 -uz "$MOUNT" 2>/dev/null || umount -l "$MOUNT" 2>/dev/null || true; fi
   prepare_run_dir
   make_etc_view

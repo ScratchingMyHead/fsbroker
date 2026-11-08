@@ -1,13 +1,17 @@
 # fsbroker — interactive Linux filesystem permission broker
 
-Run a program inside a deny-by-default filesystem sandbox and let a host-side
-broker grant it more access, one decision at a time.
+Run a harness or other app inside a deny-by-default filesystem sandbox and let
+a host-side broker grant it more access to the actual filesystem with a desktop
+popup. This provides protection against an agentic harness accidentally harming
+data outside allowed locations without fully restricting the agent to a virtual
+filesystem. e.g. performing system administration on the host system without
+dangerously broad file access.
 
 The sandbox root is a FUSE virtual root (`vroot`): it exposes only the
 directories listed in a config file, at their real host paths, and returns
 `ENOENT` for everything else. Nothing outside the list exists to the sandboxed
 program. When it tries to change something read-only, or asks to add a folder,
-a prompt appears on your real desktop and the answer is enforced by the kernel
+a prompt appears on your desktop and the answer is enforced by the kernel
 (the FUSE daemon), not by the application.
 
 ## Getting started
@@ -41,10 +45,10 @@ Locations (override with flags or the environment):
 
 ## Using it
 
-For everyday use there is one thing to do: tailor `run-opencode.sh` and point a
-desktop menu item (or a shortcut) at it. That is the whole workflow.
+Tailor `run-opencode.sh` to the harness you wish to use and point a
+desktop menu item at it.
 
-The launcher sets where runtime lives, which config to use, and the program to
+The launcher sets where the runtime lives, which config to use, and the program to
 run, then calls:
 
 ```bash
@@ -52,9 +56,9 @@ bin/fsbroker ... session -- <program> [args]
 ```
 
 `session` mounts the virtual root, starts the broker, runs the program, and
-unmounts and stops the broker again when it exits. There is nothing else to run.
+unmounts and stops the broker again when it exits.
 
-Everything app-specific lives in `run-opencode.sh` — copy it and change the
+Everything harness-specific lives in `run-opencode.sh` — copy it and change the
 program to sandbox something else. `bin/fsbroker` itself knows nothing about
 OpenCode.
 
@@ -101,8 +105,8 @@ What a decision covers, and for how long:
 are deliberately *not* prompted for. The agent asks explicitly:
 
 ```bash
-fsbroker-request /home/rj/Documents           # read-only
-fsbroker-request /home/rj/Documents --write   # read-write
+fsbroker-request /home/joe/Documents           # read-only
+fsbroker-request /home/joe/Documents --write   # read-write
 ```
 
 (on `PATH` inside the sandbox). An **access request** dialog offers `Deny` /
@@ -150,11 +154,9 @@ filesystem), `policy.rs` (runtime grants), `ctl.rs` (host-only control socket),
 - **The network namespace is shared.** The sandbox sees the host loopback and
   LAN (that is also why its OpenCode service must use a different port).
 - **Same UID.** It runs as your UID, so the boundary is the mount namespace, not
-  the UID. A dedicated agent account is the long-term answer.
+  the UID.
 - **The FUSE loop is single-threaded** (`fuser` 0.14): while a prompt is open the
-  whole mount waits for the answer (up to 5 minutes). A threaded loop is the fix.
-- **A denied path is cached for 60 s**, so a retry loop fails fast instead of
-  re-prompting.
+  whole mount waits for the answer (up to 5 minutes).
 - **1 s attribute TTL** (`fuser` has no invalidation), so changes can take up to
   a second to be visible.
 - **One daemon, no supervisor.** If the daemon dies while mounted, the mount

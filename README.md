@@ -120,6 +120,21 @@ user. Choices: `Deny`, `Allow once`, and `Allow for…` → `10 minutes` / `1 ho
   restart (`Always` = don't ask again in future runs).
 - Every decision is appended to `<run>/audit.log` as one JSON line.
 
+What a decision covers, and for how long:
+
+- **Allow once** — exactly that one operation on that path; nothing is
+  remembered.
+- **This session / 10 minutes … / Always** — scoped to the **directory**. Acting
+  on a file grants the directory that contains it; acting on a directory grants
+  that directory; a `rename` grants the common parent of both ends. So approving
+  one write in a folder stops the prompt for the rest of that folder, for as long
+  as the grant lasts.
+- **Deny** — remembered by the daemon for **60 seconds**, per **exact path** (the
+  item the operation named, and anything under it if it is a folder). A retry in
+  that window fails immediately with `EACCES` instead of prompting; a different
+  file in the same folder still prompts, and after 60 seconds the denied path
+  prompts again. Denials are not persisted and clear when the daemon stops.
+
 **Add a folder it cannot see.** Paths outside the mapping set are `ENOENT` and
 are deliberately *not* prompted for. The agent asks explicitly:
 

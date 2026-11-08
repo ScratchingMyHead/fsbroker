@@ -69,9 +69,28 @@ bin/fsbroker ... status                              # what the agent can access
 bin/fsbroker-status --run-dir ~/fsbroker_opencode    # the same, standalone
 ```
 
-`bin/fsbroker` also has `shell`, `run`, `mount`, `umount`, `broker` and
-`approvals` for manual use and troubleshooting; none of it is needed for normal
-operation.
+`bin/fsbroker` also has `shell`, `run`, `mount`, `umount`, `broker`,
+`approvals` and `root-shell` for manual use and troubleshooting; none of it is
+needed for normal operation.
+
+## A root shell that still sees only the sandbox
+
+A running session can be entered as real root from the host:
+
+```bash
+bin/fsbroker ... root-shell
+```
+
+It `sudo nsenter`s into the sandbox's mount namespace, so the shell sees only
+the mapped paths: anything unmapped is `ENOENT`, read-only mappings still refuse
+writes, and write prompts still come from the broker. Privileges are the host's,
+so root can deliberately leave the namespace; the point is that it cannot reach
+anything by accident.
+
+This needs `allow_other = true` in the config and `user_allow_other`
+uncommented in `/etc/fuse.conf` — FUSE otherwise refuses the mount to any uid
+but yours. With `allow_other` on, the mount is reachable by other local uids, so
+the run directory is tightened to `0700`.
 
 ## The two things the agent can do
 

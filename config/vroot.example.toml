@@ -8,6 +8,14 @@
 # Two placeholders are expanded before the daemon reads this file:
 #   ${run}   the run directory (--run-dir / FSBROKER_RUN_DIR)
 #   ${home}  the sandbox's writable home (default ${run}/home)
+#
+# Uncomment to let a different uid use the mount. This is what
+# `fsbroker root-shell` needs: root entering the sandbox's namespaces is refused
+# by FUSE unless the mount allows other users. It also requires uncommenting
+# `user_allow_other` in /etc/fuse.conf, and it makes <run>/mount reachable by
+# any local uid, so the run directory is tightened to 0700 when it is enabled.
+#
+# allow_other = true
 
 # The sandbox's own writable home, at the fixed path /home/agent. Keep this: it
 # is the only place the agent can write without asking.

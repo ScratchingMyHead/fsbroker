@@ -11,6 +11,7 @@
 #   shell                 start a shell inside the sandbox
 #   run [--] <cmd> ...    run a command inside the sandbox
 #   session [--] <cmd>    mount + broker + run, then tear down
+#   root-shell [shell]    enter the running session as root (needs allow_other)
 #   status                show what the agent can currently access
 #   approvals [cmd...]    the broker's remembered write approvals (default: list)
 #   paths                 print the resolved locations and exit
@@ -146,6 +147,15 @@ cmd_mount() {
   prepare_run_dir
   make_etc_view
   resolve_config
+  # `allow_other` lets a different uid (root, via `fsbroker root-shell`) use the
+  # mount. Unprivileged FUSE refuses that unless /etc/fuse.conf allows it, and
+  # the mount then also becomes reachable by any local uid, so keep the run
+  # directory private.
+  if grep -qE '^[[:space:]]*allow_other[[:space:]]*=[[:space:]]*true' "$RESOLVED"; then
+    grep -qE '^[[:space:]]*user_allow_other' /etc/fuse.conf 2>/dev/null \
+      || die "allow_other = true needs 'user_allow_other' in /etc/fuse.conf (uncomment it as root)"
+    chmod 700 "$RUN_DIR"
+  fi
   say "mounting $MOUNT (run dir $RUN_DIR)"
   RUST_LOG=${RUST_LOG:-info} setsid nohup "$DAEMON" \
     --config "$RESOLVED" --run-dir "$RUN_DIR" --mount-point "$MOUNT" \
@@ -164,6 +174,7 @@ cmd_umount() {
     kill "$(cat "$RUN_DIR/vroot.pid")" 2>/dev/null || true
     rm -f "$RUN_DIR/vroot.pid"
   fi
+  rm -f "$RUN_DIR/sandbox.pid"
   say "unmounted $MOUNT"
 }
 
@@ -247,7 +258,18 @@ sandbox_args() {
 
 sandbox_exec() { sandbox_args; exec bwrap "${BWRAP_ARGS[@]}" -- "$@"; }
 # Same, but as a child process, so the caller survives to run its cleanup.
-sandbox_run()  { sandbox_args; bwrap "${BWRAP_ARGS[@]}" -- "$@"; }
+# The pid is recorded so `root-shell` can find the sandbox. Note that bwrap
+# itself stays in the host namespaces; the sandboxed program is its child.
+sandbox_run() {
+  sandbox_args
+  bwrap "${BWRAP_ARGS[@]}" -- "$@" &
+  local pid=$!
+  echo "$pid" > "$RUN_DIR/sandbox.pid"
+  local rc=0
+  wait "$pid" || rc=$?
+  rm -f "$RUN_DIR/sandbox.pid"
+  return $rc
+}
 
 cmd_shell() { sandbox_exec "${SHELL:-/bin/bash}" "$@"; }
 cmd_run()   { [ "${1:-}" = "--" ] && shift; [ $# -gt 0 ] || die "run needs a command"; sandbox_exec "$@"; }
@@ -269,7 +291,7 @@ cmd_session() {
     [ "${SESSION_UP:-0}" = 1 ] || return 0
     cmd_broker stop >/dev/null 2>&1 || true
     cmd_umount >/dev/null 2>&1 || true
-    rm -f "$RUN_DIR/session.lock"
+    rm -f "$RUN_DIR/session.lock" "$RUN_DIR/sandbox.pid"
   }
   trap cleanup EXIT INT TERM
   mkdir -p "$RUN_DIR"
@@ -282,7 +304,32 @@ cmd_session() {
   sandbox_run "$@"
 }
 
-cmd_help() { sed -n '2,30p' "$SELF" | sed 's/^# \{0,1\}//'; }
+# Enter the running session's mount namespace as real root. Visibility is still
+# the vroot: unmapped paths do not exist, read-only mounts still refuse writes,
+# and write prompts still come from the broker. Privileges are the host's, so
+# root can leave the namespace deliberately; it just cannot wander out by
+# accident. Requires `allow_other = true` (see cmd_mount).
+cmd_root_shell() {
+  [ "${1:-}" = "--" ] && shift
+  local sh=${1:-${SHELL:-/bin/bash}}
+  is_mounted || die "the virtual root is not mounted; run: fsbroker mount"
+  [ -f "$RUN_DIR/sandbox.pid" ] \
+    || die "no sandbox is running for $RUN_DIR (start one with: session)"
+  grep -qE '^[[:space:]]*allow_other[[:space:]]*=[[:space:]]*true' "$RESOLVED" 2>/dev/null \
+    || die "root-shell needs allow_other = true in the config (and 'user_allow_other' in /etc/fuse.conf)"
+  local bpid apppid
+  bpid=$(cat "$RUN_DIR/sandbox.pid" 2>/dev/null)
+  kill -0 "$bpid" 2>/dev/null || die "the sandbox process $bpid is gone"
+  apppid=$(pgrep -P "$bpid" 2>/dev/null | head -1)
+  [ -n "$apppid" ] || die "cannot find the sandboxed process under pid $bpid"
+  say "entering the sandbox as root (sandbox pid $apppid)"
+  say "the virtual root still applies; leaving it would take deliberate effort"
+  exec sudo nsenter -t "$apppid" -m -p -- "$sh"
+}
+
+# The usage text is the comment block at the top of this file: print it up to
+# the first line that is not a comment, so code can never leak into `help`.
+cmd_help() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$SELF"; }
 
 case "$cmd" in
   build)    cmd_build ;;
@@ -292,6 +339,7 @@ case "$cmd" in
   shell)    cmd_shell "$@" ;;
   run)      cmd_run "$@" ;;
   session)  cmd_session "$@" ;;
+  root-shell) cmd_root_shell "$@" ;;
   status)   cmd_status ;;
   approvals) cmd_approvals "$@" ;;
   paths|config) cmd_paths ;;

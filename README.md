@@ -80,6 +80,27 @@ directory, mounted or not.
 `approvals` and `root-shell` for manual use and troubleshooting; none of it is
 needed for normal operation.
 
+## Managing the rules
+
+```bash
+./manage_rules.sh                  # or: bin/fsbroker ... rules
+```
+
+One window per running session, showing the same three things as `status`: the
+visible mounts, the write approvals, and the denials. Anything that did not come
+from the config has a **Remove** button — a folder the agent asked for through an
+access request, or an allow/deny rule from a prompt. Config mounts are listed but
+not removable: only editing the config file and restarting takes those away.
+
+The permission dialog has a **Manage rules…** button that opens it, which is the
+point of it being a separate process: you can go and take back a rule you just
+granted without answering the prompt in front of you, and neither window blocks
+the other.
+
+Removing a mount takes effect for everything the agent looks up from then on.
+Files it already has open keep working until it closes them — the same promise a
+revoked grant makes, and the same caveat as deleting an open file.
+
 ## A root shell that still sees only the sandbox
 
 A running session can be entered as real root from the host via tmux (WITH A GREAT DEAL OF CAUTION). The sandboxed agent can access the root tmux with send-keys and capture-pane (more details when you run it). To do so the user should run:

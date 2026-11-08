@@ -40,6 +40,7 @@ import json
 import os
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -368,11 +369,13 @@ def parse_answer(text):
 class Prompt:
     """Shows one permission dialog and returns the chosen decision."""
 
-    def __init__(self, no_gui, test_answer, test_request=None, roots=None):
+    def __init__(self, no_gui, test_answer, test_request=None, roots=None,
+                 run_dir=None):
         self.no_gui = no_gui
         self.test_answer = test_answer
         self.test_request = test_request
         self.roots = roots or []
+        self.run_dir = run_dir
         self.queue = []
         self.queue_lock = threading.Lock()
         self.busy = False
@@ -495,6 +498,21 @@ class Prompt:
             print(f"broker: could not centre the dialog: {e}",
                   file=sys.stderr, flush=True)
 
+    def _spawn_manager(self):
+        """Open the rule manager as its own process. Being a separate process is
+        what makes it non-modal: this prompt stays open and answerable."""
+        manager = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), os.pardir,
+            "bin", "fsbroker-manage"))
+        argv = [manager] + (["--run-dir", self.run_dir] if self.run_dir else [])
+        try:
+            subprocess.Popen(argv, start_new_session=True,
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        except OSError as e:
+            print(f"broker: could not start the rule manager: {e}",
+                  file=sys.stderr, flush=True)
+
     def _show_request(self, path, writable, pid, uid):
         Gtk = self.Gtk
         dlg = Gtk.Dialog(title="fsbroker — access request")
@@ -612,10 +630,15 @@ class Prompt:
             margin=12,
         )
         buttons.set_layout(Gtk.ButtonBoxStyle.END)
+        # A way out of a hasty "always": open the manager without answering this
+        # prompt. Its own process, so nothing here is modal.
+        manage = Gtk.Button(label="Manage rules…")
+        manage.connect("clicked", lambda *_: self._spawn_manager())
         deny = Gtk.Button(label="Deny")
         deny.connect("clicked", lambda *_: dlg.response(0))
         allow = Gtk.Button(label="Allow")
         allow.connect("clicked", lambda *_: dlg.response(1))
+        buttons.add(manage)
         buttons.add(deny)
         buttons.add(allow)
         content.add(buttons)
@@ -657,7 +680,7 @@ class Broker:
         self.audit = Audit(args.audit)
         self.roots = mount_roots(args.run_dir)
         self.prompt = Prompt(args.no_gui, args.test_answer, args.test_request,
-                             roots=self.roots)
+                             roots=self.roots, run_dir=args.run_dir)
         self.sock_path = args.socket
 
     def handle(self, line):

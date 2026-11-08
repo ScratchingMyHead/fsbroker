@@ -71,7 +71,9 @@ owns every scope wider than one operation — `session` in memory, `timed` and
 `always` in `run/broker-state.json` — and the daemon keeps no copy, so a revoke
 or expiry applies to the next operation. A grant on `/home/rj/projects/foo`
 does not extend to `/home/rj/projects/bar`. Nothing edits the config behind the
-user's back; there is a list/revoke command.
+user's back; `fsbroker status` and the rule manager (`manage_rules.sh`) list
+everything, and the manager can revoke anything that did not come from the
+config — a rule or a folder added by an access request.
 
 If the prompt is not answered within the timeout (5 minutes at the daemon,
 4 minutes at the broker) the operation is denied. A denial is a rule like a

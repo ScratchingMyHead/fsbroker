@@ -12,6 +12,7 @@
 //!   MOUNTS                     the live mount table (config + runtime)
 //!   GRANT <once|session> <absolute path>
 //!   REVOKE <absolute path>
+//!   DROP <absolute virtual path>   remove a runtime mount (never a config one)
 //!   CLEAR
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -95,8 +96,11 @@ fn dispatch(line: &str, policy: &Arc<Mutex<Policy>>, table: &Arc<RwLock<MountTab
         }
         "MOUNTS" => {
             let t = table.read().unwrap();
-            let mut out = format!("OK {}\n", t.mounts.len());
-            for m in &t.mounts {
+            // Dropped runtime mounts keep their slot (indices are baked into
+            // live inodes) but no longer exist, so they are not listed.
+            let live: Vec<_> = t.mounts.iter().filter(|m| !m.removed).collect();
+            let mut out = format!("OK {}\n", live.len());
+            for m in live {
                 out.push_str(&format!(
                     "mount {} {} {} {}\n",
                     if m.writable { "rw" } else { "ro" },
@@ -130,6 +134,16 @@ fn dispatch(line: &str, policy: &Arc<Mutex<Policy>>, table: &Arc<RwLock<MountTab
                 format!("OK revoked {n} {}\n", path.display())
             }
             None => "ERR usage: REVOKE <absolute path>\n".to_string(),
+        },
+        "DROP" => match normalize(rest) {
+            Some(path) => match table.write().unwrap().remove(&path) {
+                Ok(()) => {
+                    log::info!("dropped runtime mount {}", path.display());
+                    format!("OK dropped {}\n", path.display())
+                }
+                Err(e) => format!("ERR {e}\n"),
+            },
+            None => "ERR usage: DROP <absolute virtual path>\n".to_string(),
         },
         "CLEAR" => {
             let n = policy.lock().unwrap().clear();

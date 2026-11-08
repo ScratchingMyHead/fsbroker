@@ -209,6 +209,16 @@ impl VrootFs {
 
     fn node_kind(&self, ino: u64) -> Result<(PathBuf, NodeKind), i32> {
         let n = self.nodes.get(&ino).ok_or(libc::ENOENT)?;
+        // A runtime mapping the user has since dropped. The inode may still be
+        // referenced by the kernel, but the path it names no longer exists, so
+        // nothing new may be done through it. Already-open descriptors keep
+        // working, like an unlinked file.
+        if let NodeKind::Host(mi) = n.kind {
+            let table = self.table.read().unwrap();
+            if table.mounts.get(mi).map_or(true, |m| m.removed) {
+                return Err(libc::ENOENT);
+            }
+        }
         Ok((n.vpath.clone(), n.kind))
     }
 
@@ -629,7 +639,7 @@ impl VrootFs {
                 let mut children: Vec<PathBuf> = Vec::new();
                 let table = self.table.read().unwrap();
                 for m in &table.mounts {
-                    if m.vpath.parent() == Some(vpath.as_path()) {
+                    if !m.removed && m.vpath.parent() == Some(vpath.as_path()) {
                         children.push(m.vpath.clone());
                     }
                 }

@@ -13,6 +13,7 @@
 #   session [--] <cmd>    mount + broker + run, then tear down
 #   root-shell [--] [cmd ...]  enter the running session as root (needs allow_other)
 #   status                show what the agent can currently access
+#   rules                 GUI to view and remove the non-config rules
 #   approvals [cmd...]    the broker's remembered allow/deny rules (default: list)
 #   paths                 print the resolved locations and exit
 #   help
@@ -241,6 +242,10 @@ cmd_broker() {
 
 cmd_status() { exec "$REPO/bin/fsbroker-status" --run-dir "$RUN_DIR"; }
 
+# The GUI view of the same thing, with a Remove on everything not from the
+# config: runtime mounts and the broker's allow/deny rules.
+cmd_rules() { exec "$REPO/bin/fsbroker-manage" --run-dir "$RUN_DIR" "$@"; }
+
 # The broker's write approvals (the ones the prompt creates and remembers).
 cmd_approvals() {
   exec "$REPO/broker/brokerctl" --run-dir "$RUN_DIR" "${@:-list}"
@@ -403,6 +408,7 @@ case "$cmd" in
   session)  cmd_session "$@" ;;
   root-shell) cmd_root_shell "$@" ;;
   status)   cmd_status ;;
+  rules)    cmd_rules "$@" ;;
   approvals) cmd_approvals "$@" ;;
   paths|config) cmd_paths ;;
   help|"")  cmd_help ;;

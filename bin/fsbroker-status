@@ -13,88 +13,10 @@ This command prints both, so there is one place to look.
 """
 import argparse
 import os
-import socket
 import sys
 
-
-def default_run_dir():
-    d = os.environ.get("FSBROKER_RUN_DIR")
-    return d or os.path.join(
-        os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
-        "fsbroker",
-    )
-
-
-def discover_run_dirs():
-    """Run directories with a live vroot mount, newest first.
-
-    Every mounted session appears in /proc/self/mounts as `vroot <dir>/mount
-    fuse.vroot`, so the mount table names the run directories without having to
-    guess where they are. A run directory that is mounted but whose daemon has
-    died still shows up, which is the honest answer for it.
-    """
-    found = []
-    try:
-        with open("/proc/self/mounts", "rb") as f:
-            lines = f.read().decode(errors="replace").splitlines()
-    except OSError:
-        return []
-    for line in lines:
-        parts = line.split(" ")
-        if len(parts) < 3:
-            continue
-        source, mountpoint, fstype = parts[0], parts[1], parts[2]
-        if source != "vroot" and not fstype.startswith("fuse.vroot"):
-            continue
-        # /proc escapes spaces and friends as octal.
-        mountpoint = (mountpoint.replace("\\040", " ").replace("\\011", "\t")
-                      .replace("\\012", "\n").replace("\\134", "\\"))
-        rd = os.path.dirname(mountpoint.rstrip("/"))
-        if rd and rd not in found:
-            found.append(rd)
-    return found
-
-
-def query(sock, line, timeout=5):
-    if not os.path.exists(sock):
-        return None
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    try:
-        s.connect(sock)
-        s.sendall(line.encode() + b"\n")
-        chunks = []
-        while True:
-            b = s.recv(65536)
-            if not b:
-                break
-            chunks.append(b)
-    except OSError:
-        return None
-    finally:
-        s.close()
-    return b"".join(chunks).decode(errors="replace").splitlines()
-
-
-def parse_mounts(lines):
-    out = []
-    for ln in lines[1:]:
-        p = ln.split(" ", 4)
-        if len(p) == 5 and p[0] == "mount":
-            out.append(p[1:])  # access, source, vpath, host
-    return out
-
-
-def parse_grants(lines):
-    """(kind, scope, path) for each `grant`/`deny` rule."""
-    out = []
-    for ln in lines[1:]:
-        for kind in ("grant", "deny"):
-            if ln.startswith(kind + " "):
-                _, scope, path = ln.split(" ", 2)
-                out.append((kind, scope, path))
-                break
-    return out
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import fsbroker_proto as proto
 
 
 def section(title):
@@ -107,16 +29,16 @@ def report(run_dir):
     vroot_sock = os.path.join(run_dir, "vroot.sock")
     broker_sock = os.path.join(run_dir, "broker.sock")
 
-    mounts = query(vroot_sock, "MOUNTS")
-    vgrants = query(vroot_sock, "LIST")
-    bgrants = query(broker_sock, "LIST")
+    mounts = proto.query(vroot_sock, "MOUNTS")
+    vgrants = proto.query(vroot_sock, "LIST")
+    bgrants = proto.query(broker_sock, "LIST")
 
     # --- visibility -------------------------------------------------------
     section("VISIBLE — paths that exist inside the sandbox")
     if mounts is None:
         print("  (daemon not running — nothing is mounted)")
     else:
-        rows = parse_mounts(mounts)
+        rows = proto.parse_mounts(mounts)
         # config first, then this session's requests, each alphabetical
         rows.sort(key=lambda r: (r[1] != "config", r[2]))
         w = max((len(r[2]) for r in rows), default=4)
@@ -132,7 +54,7 @@ def report(run_dir):
     for source, lines in (("broker", bgrants), ("daemon", vgrants)):
         if lines is None:
             continue
-        for kind, scope, path in parse_grants(lines):
+        for kind, scope, path in proto.parse_rules(lines):
             (allows if kind == "grant" else denies).append((source, scope, path))
 
     if not allows:
@@ -165,7 +87,7 @@ def main():
         # No run dir and no FSBROKER_RUN_DIR: ask the mount table rather than
         # guessing a path. Falling back to the default keeps the "nothing is
         # running" answer useful.
-        dirs = discover_run_dirs() or [default_run_dir()]
+        dirs = proto.discover_run_dirs() or [proto.default_run_dir()]
 
     print("fsbroker — current access"
           + (f"  ({len(dirs)} mounted sessions)" if len(dirs) > 1 else ""))

@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""fsbroker — GUI rule manager.
+
+One window per running session, listing what the sandbox can see and what it
+may change, with a Remove button on everything that is not from the config:
+runtime mounts added by an approved access request, and the write allow/deny
+rules the prompt creates. Config mounts are shown but not removable — only the
+config file can take those away.
+
+    fsbroker-manage [--run-dir <dir>]
+"""
+import argparse
+import os
+import sys
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import fsbroker_proto as proto
+
+
+class Manager(Gtk.Window):
+    def __init__(self, run_dir):
+        super().__init__(title=f"fsbroker rules — {run_dir}")
+        self.run_dir = run_dir
+        self.vroot_sock = os.path.join(run_dir, "vroot.sock")
+        self.broker_sock = os.path.join(run_dir, "broker.sock")
+        self.busy = False
+
+        self.set_default_size(900, -1)
+        self.set_border_width(12)
+        self.connect("destroy", Gtk.main_quit)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        self.add(box)
+
+        self.header = Gtk.Label(xalign=0)
+        self.header.set_selectable(True)
+        box.add(self.header)
+
+        self.grids = {}
+        for key, title in (
+            ("mounts", "VISIBLE — what exists inside the sandbox"),
+            ("allows", "WRITE APPROVALS — allowed with no prompt"),
+            ("denies", "DENIALS — refused with no prompt"),
+        ):
+            frame = Gtk.Frame(label=title)
+            grid = Gtk.Grid(column_spacing=12, row_spacing=4, margin=8)
+            frame.add(grid)
+            box.add(frame)
+            self.grids[key] = grid
+
+        buttons = Gtk.ButtonBox(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        buttons.set_layout(Gtk.ButtonBoxStyle.END)
+        close = Gtk.Button(label="Close")
+        close.connect("clicked", lambda *_: self.destroy())
+        refresh = Gtk.Button(label="Refresh")
+        refresh.connect("clicked", lambda *_: self.populate())
+        buttons.add(close)
+        buttons.add(refresh)
+        box.add(buttons)
+
+        self.populate()
+        self.show_all()
+
+    # ---- rendering ----------------------------------------------------
+
+    def note(self, grid, row, text):
+        label = Gtk.Label(label=text, xalign=0)
+        label.get_style_context().add_class("dim-label")
+        grid.attach(label, 0, row, 4, 1)
+
+    def row(self, grid, row, cells, remove=None):
+        for col, text in enumerate(cells):
+            label = Gtk.Label(label=text, xalign=0)
+            label.set_selectable(True)
+            grid.attach(label, col, row, 1, 1)
+        if remove is not None:
+            kind, target = remove
+            button = Gtk.Button(label="Remove")
+            button.connect("clicked", lambda *_: self.on_remove(kind, target))
+            cell = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+            cell.pack_end(button, False, False, 0)
+            grid.attach(cell, len(cells), row, 1, 1)
+
+    def clear(self, grid):
+        for child in grid.get_children():
+            grid.remove(child)
+
+    def populate(self):
+        for grid in self.grids.values():
+            self.clear(grid)
+
+        mounts = proto.query(self.vroot_sock, "MOUNTS")
+        daemon_rules = proto.query(self.vroot_sock, "LIST")
+        broker_rules = proto.query(self.broker_sock, "LIST")
+
+        daemon_up = mounts is not None
+        broker_up = broker_rules is not None
+        self.header.set_text(
+            f"run dir: {self.run_dir}\n"
+            f"daemon: {'running' if daemon_up else 'not running'}    "
+            f"broker: {'running' if broker_up else 'not running'}")
+
+        # --- visible mounts ---
+        grid = self.grids["mounts"]
+        if not daemon_up:
+            self.note(grid, 0, "(daemon not running — nothing is mounted)")
+        else:
+            for row, (access, source, vpath, host) in enumerate(
+                    sorted(proto.parse_mounts(mounts), key=lambda r: r[2])):
+                where = "config" if source == "config" else "session request"
+                note = "" if source == "config" else f"   (-> {host})"
+                remove = None if source == "config" else ("mount", vpath)
+                self.row(grid, row, [vpath + note, access, where], remove)
+
+        # --- rules, from both sources ---
+        allows = []
+        denies = []
+        for source, lines in (("daemon", daemon_rules), ("broker", broker_rules)):
+            if lines is None:
+                continue
+            for kind, scope, path in proto.parse_rules(lines):
+                (allows if kind == "grant" else denies).append((source, scope, path))
+
+        grid = self.grids["allows"]
+        if not allows:
+            self.note(grid, 0, "(none — every write to a read-only path prompts)")
+        else:
+            for row, (source, scope, path) in enumerate(
+                    sorted(allows, key=lambda r: r[2])):
+                self.row(grid, row, [path, scope, source],
+                         ("daemon-rule" if source == "daemon" else "broker-rule", path))
+
+        grid = self.grids["denies"]
+        if not denies:
+            self.note(grid, 0, "(none)")
+        else:
+            for row, (source, scope, path) in enumerate(
+                    sorted(denies, key=lambda r: r[2])):
+                self.row(grid, row, [path, scope, source],
+                         ("daemon-rule" if source == "daemon" else "broker-rule", path))
+
+        self.show_all()
+
+    # ---- actions ------------------------------------------------------
+
+    def on_remove(self, kind, target):
+        if self.busy:            # a double click must not act twice
+            return
+        self.busy = True
+        try:
+            if kind == "mount":
+                reply = proto.query(self.vroot_sock, f"DROP {target}")
+            elif kind == "daemon-rule":
+                reply = proto.query(self.vroot_sock, f"REVOKE {target}")
+            else:
+                reply = proto.query(self.broker_sock, f"REVOKE {target}")
+
+            if reply is None:
+                self.error(f"no answer from the socket for {target}")
+            elif not reply[0].startswith("OK") and "not mapped" not in reply[0]:
+                # "not mapped" means it was already gone, which is the state we
+                # asked for; anything else is worth showing.
+                self.error(reply[0])
+        finally:
+            self.busy = False
+        self.populate()
+
+    def error(self, message):
+        dlg = Gtk.MessageDialog(transient_for=self, modal=True,
+                                message_type=Gtk.MessageType.ERROR,
+                                buttons=Gtk.ButtonsType.CLOSE, text=message)
+        dlg.run()
+        dlg.destroy()
+
+
+def main():
+    ap = argparse.ArgumentParser(description="fsbroker rule manager")
+    ap.add_argument("--run-dir", default=None,
+                    help="run directory (env FSBROKER_RUN_DIR). Default: every "
+                         "mounted session, from the mount table")
+    args = ap.parse_args()
+
+    if args.run_dir:
+        dirs = [args.run_dir]
+    else:
+        dirs = proto.discover_run_dirs() or [proto.default_run_dir()]
+
+    windows = [Manager(d) for d in dirs]
+    Gtk.main()
+    return 0 if windows else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

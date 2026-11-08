@@ -46,6 +46,10 @@ pub struct Mount {
     /// Added at runtime by an approved request (session-only), as opposed to
     /// loaded from the config (permanent).
     pub runtime: bool,
+    /// Dropped at runtime by the user. The entry stays in the vector — mount
+    /// indices are baked into live inodes, so the order must never change — but
+    /// it no longer classifies any path, and so no longer exists in the sandbox.
+    pub removed: bool,
 }
 
 impl Mount {
@@ -73,6 +77,7 @@ impl Mount {
             writable,
             dirfd,
             runtime: true,
+            removed: false,
         })
     }
 }
@@ -109,14 +114,16 @@ impl MountTable {
     }
 
     pub fn len(&self) -> usize {
-        self.mounts.len()
+        self.mounts.iter().filter(|m| !m.removed).count()
     }
 
-    /// The most specific mount whose virtual path is a prefix of `v`.
+    /// The most specific mount whose virtual path is a prefix of `v`. A mount
+    /// the user has dropped does not classify anything, so its paths stop
+    /// existing.
     pub fn find_mount(&self, v: &Path) -> Option<usize> {
         self.mounts
             .iter()
-            .position(|m| v == m.vpath || v.starts_with(&m.vpath))
+            .position(|m| !m.removed && (v == m.vpath || v.starts_with(&m.vpath)))
     }
 
     pub fn classify(&self, v: &Path) -> Option<NodeKind> {
@@ -143,7 +150,15 @@ impl MountTable {
     /// make "which mount owns this path" ambiguous — the same rule the config
     /// loader applies.
     pub fn add(&mut self, mount: Mount) -> Result<()> {
-        if self.mounts.iter().any(|m| m.vpath == mount.vpath) {
+        if let Some(i) = self.mounts.iter().position(|m| m.vpath == mount.vpath) {
+            if self.mounts[i].removed {
+                // Re-adding a path that was dropped: reuse the slot rather than
+                // appending a duplicate. The index matches the path either way,
+                // and any inode still holding it now refers to the new mount.
+                self.mounts[i] = mount;
+                self.rebuild_synthetic();
+                return Ok(());
+            }
             bail!("already mapped: {}", mount.vpath.display());
         }
         for m in &self.mounts {
@@ -167,10 +182,25 @@ impl MountTable {
         Ok(())
     }
 
+    /// Drop a mapping added at runtime. Config mounts are permanent: only the
+    /// user's own config file can take those away, by editing it and restarting.
+    pub fn remove(&mut self, vpath: &Path) -> Result<()> {
+        let idx = match self.mounts.iter().position(|m| m.vpath == vpath && !m.removed) {
+            Some(i) => i,
+            None => bail!("not mapped: {}", vpath.display()),
+        };
+        if !self.mounts[idx].runtime {
+            bail!("{} comes from the config, not a session request", vpath.display());
+        }
+        self.mounts[idx].removed = true;
+        self.rebuild_synthetic();
+        Ok(())
+    }
+
     fn rebuild_synthetic(&mut self) {
         self.synthetic.clear();
         self.synthetic.insert(PathBuf::from("/"));
-        for m in &self.mounts {
+        for m in self.mounts.iter().filter(|m| !m.removed) {
             let mut cur = m.vpath.parent();
             while let Some(p) = cur {
                 self.synthetic.insert(p.to_path_buf());
@@ -267,6 +297,7 @@ impl Config {
                 writable: spec.writable && !raw.read_only,
                 dirfd,
                 runtime: false,
+                removed: false,
             });
         }
 

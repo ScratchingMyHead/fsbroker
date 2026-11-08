@@ -50,6 +50,10 @@ pub struct Mount {
     /// indices are baked into live inodes, so the order must never change — but
     /// it no longer classifies any path, and so no longer exists in the sandbox.
     pub removed: bool,
+    /// From the sidecar of permanently-approved mounts rather than the user's
+    /// own config. Those are the ones the rule manager may remove; the user's
+    /// written config is permanent by definition.
+    pub generated: bool,
 }
 
 impl Mount {
@@ -78,6 +82,7 @@ impl Mount {
             dirfd,
             runtime: true,
             removed: false,
+            generated: false,
         })
     }
 }
@@ -189,8 +194,11 @@ impl MountTable {
             Some(i) => i,
             None => bail!("not mapped: {}", vpath.display()),
         };
-        if !self.mounts[idx].runtime {
-            bail!("{} comes from the config, not a session request", vpath.display());
+        if !(self.mounts[idx].runtime || self.mounts[idx].generated) {
+            bail!(
+                "{} is in your config file, not an approved request",
+                vpath.display()
+            );
         }
         self.mounts[idx].removed = true;
         self.rebuild_synthetic();
@@ -232,6 +240,127 @@ fn normalize_virtual(raw: &str) -> Result<PathBuf> {
     Ok(out)
 }
 
+/// Validate and open one `[[mount]]` spec.
+fn open_spec(spec: &MountSpec, read_only: bool) -> Result<(PathBuf, Mount)> {
+    // Default: the host path itself, so inside and outside agree.
+    let vpath = match &spec.virtual_path {
+        Some(v) => normalize_virtual(v)?,
+        None => {
+            let h = spec.host.to_str().with_context(|| {
+                format!("host path is not valid UTF-8: {}", spec.host.display())
+            })?;
+            normalize_virtual(h)?
+        }
+    };
+    if vpath == Path::new("/") {
+        bail!("refusing to map / to a host directory; map explicit subtrees instead");
+    }
+    let host = fs::canonicalize(&spec.host).with_context(|| {
+        format!("resolving host path {} for {}", spec.host.display(), vpath.display())
+    })?;
+    let meta = fs::metadata(&host)
+        .with_context(|| format!("stat host path {}", host.display()))?;
+    if !meta.is_dir() {
+        bail!("host path is not a directory: {}", host.display());
+    }
+    let dirfd = sys::openat2(
+        libc::AT_FDCWD,
+        &host,
+        libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        0,
+        0,
+    )
+    .with_context(|| format!("opening host path {}", host.display()))?;
+    Ok((
+        vpath.clone(),
+        Mount {
+            vpath,
+            host,
+            writable: spec.writable && !read_only,
+            dirfd,
+            runtime: false,
+            removed: false,
+            generated: false,
+        },
+    ))
+}
+
+/// Append the sidecar of permanently-approved mounts, marking each `generated`.
+///
+/// Those are the furthest a rule can go without the user editing the config, so
+/// they are also the only configured mounts the rule manager may remove. A
+/// collision with the user's own config is skipped with a warning rather than
+/// failing the mount: what the user wrote wins, and a stale approval must never
+/// stop the sandbox from starting. A missing file is not an error.
+pub fn add_generated(cfg: &mut Config, path: &Path) -> Result<usize> {
+    let mounts = &mut cfg.mounts;
+    let read_only = cfg.read_only;
+    let text = match fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let raw: RootConfig = match toml::from_str(&text) {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("ignoring unreadable {}: {e}", path.display());
+            return Ok(0);
+        }
+    };
+    let read_only = read_only || raw.read_only;
+    let mut added = 0;
+    for spec in &raw.mounts {
+        let (vpath, mut mount) = match open_spec(spec, read_only) {
+            Ok(x) => x,
+            Err(e) => {
+                log::warn!("skipping approved mount {}: {e}", spec.host.display());
+                continue;
+            }
+        };
+        if mounts.iter().any(|m| {
+            !m.removed
+                && (m.vpath == vpath
+                    || vpath.starts_with(&m.vpath)
+                    || m.vpath.starts_with(&vpath))
+        }) {
+            log::warn!(
+                "skipping approved mount {}: the config already covers it",
+                vpath.display()
+            );
+            continue;
+        }
+        mount.generated = true;
+        mounts.push(mount);
+        added += 1;
+    }
+    // The synthetic directories are computed when the config is loaded, so a
+    // mount added afterwards would otherwise exist with no /var or /var/tmp to
+    // reach it through.
+    if added > 0 {
+        mounts.sort_by(|a, b| b.vpath.as_os_str().len().cmp(&a.vpath.as_os_str().len()));
+        cfg.synthetic = synthetic_from(mounts);
+    }
+    Ok(added)
+}
+
+/// Every directory that exists only in the virtual tree: `/` plus each strict
+/// ancestor of a mount point.
+fn synthetic_from(mounts: &[Mount]) -> BTreeSet<PathBuf> {
+    let mut synthetic = BTreeSet::new();
+    synthetic.insert(PathBuf::from("/"));
+    for m in mounts {
+        let mut cur = m.vpath.parent();
+        while let Some(p) = cur {
+            synthetic.insert(p.to_path_buf());
+            if p == Path::new("/") {
+                break;
+            }
+            cur = p.parent();
+        }
+    }
+    synthetic
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Config> {
         let text = fs::read_to_string(path)
@@ -245,19 +374,7 @@ impl Config {
 
         let mut mounts: Vec<Mount> = Vec::new();
         for spec in raw.mounts {
-            // Default: the host path itself, so inside and outside agree.
-            let vpath = match &spec.virtual_path {
-                Some(v) => normalize_virtual(v)?,
-                None => {
-                    let h = spec.host.to_str().with_context(|| {
-                        format!("host path is not valid UTF-8: {}", spec.host.display())
-                    })?;
-                    normalize_virtual(h)?
-                }
-            };
-            if vpath == Path::new("/") {
-                bail!("refusing to map / to a host directory; map explicit subtrees instead");
-            }
+            let (vpath, mount) = open_spec(&spec, raw.read_only)?;
             if mounts.iter().any(|m| m.vpath == vpath) {
                 bail!("duplicate virtual_path {}", vpath.display());
             }
@@ -272,51 +389,14 @@ impl Config {
                     );
                 }
             }
-
-            let host = fs::canonicalize(&spec.host).with_context(|| {
-                format!("resolving host path {} for {}", spec.host.display(), vpath.display())
-            })?;
-            let meta = fs::metadata(&host)
-                .with_context(|| format!("stat host path {}", host.display()))?;
-            if !meta.is_dir() {
-                bail!("host path is not a directory: {}", host.display());
-            }
-
-            let dirfd = sys::openat2(
-                libc::AT_FDCWD,
-                &host,
-                libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
-                0,
-                0,
-            )
-            .with_context(|| format!("opening host path {}", host.display()))?;
-
-            mounts.push(Mount {
-                vpath,
-                host,
-                writable: spec.writable && !raw.read_only,
-                dirfd,
-                runtime: false,
-                removed: false,
-            });
+            mounts.push(mount);
         }
 
         // Longest virtual path first so prefix matching is unambiguous even if
         // nesting is added later.
         mounts.sort_by(|a, b| b.vpath.as_os_str().len().cmp(&a.vpath.as_os_str().len()));
 
-        let mut synthetic = BTreeSet::new();
-        synthetic.insert(PathBuf::from("/"));
-        for m in &mounts {
-            let mut cur = m.vpath.parent();
-            while let Some(p) = cur {
-                synthetic.insert(p.to_path_buf());
-                if p == Path::new("/") {
-                    break;
-                }
-                cur = p.parent();
-            }
-        }
+        let synthetic = synthetic_from(&mounts);
 
         Ok(Config {
             mount_point: raw.mount_point,

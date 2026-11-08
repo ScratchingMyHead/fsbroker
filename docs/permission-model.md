@@ -55,9 +55,13 @@ Two distinct triggers, handled differently on purpose:
    be unusable, and would leak whether a host path exists. Instead the agent
    asks explicitly — `fsbroker-request <path> [--write]` inside the sandbox.
    The request socket is the one part of the broker bound into the sandbox, and
-   it can only ask. Approval adds the mapping at runtime (read-only or
-   read-write as the user chooses) for the rest of the daemon's run; `ENOENT`
-   is not negatively cached, so the next attempt just works.
+   it can only ask. Approval adds the mapping for this session (read-only or
+   read-write as the user chooses); `ENOENT` is not negatively cached, so the
+   next attempt just works. Tick the dialog's "remember" box and the mapping is
+   also written to a sidecar beside the config (`<config>.d/mounts.toml`), which
+   the next daemon loads as a second, separately-classified list: those mounts
+   are the ones the rule manager may remove, which is why the config you wrote
+   is never touched by either.
 
 Grant shape:
 

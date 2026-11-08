@@ -57,6 +57,16 @@ TIMED_CHOICES = {              # menu label -> seconds
 # operation and remember nothing.
 DENY_ONCE = {"action": "deny", "duration": "once", "secs": None, "path": None}
 
+# A dismissed (or unavailable) access request: grant nothing, remember nothing.
+NO_REQUEST = {"access": None, "remember": False}
+
+# Header written once, the first time a mount is approved for good.
+HEADER = """# Mounts approved for good from an access request.
+#
+# Deliberately not in {source}: a dialog must never rewrite the config you
+# wrote, and everything in this file is safe for the rule manager to remove.
+"""
+
 
 # --------------------------------------------------------------------------
 # state
@@ -245,6 +255,19 @@ def proc_field(pid, name):
 # prefix rules
 # --------------------------------------------------------------------------
 
+def read_config_source(run_dir):
+    """The config file the session was started with, as recorded by
+    `bin/fsbroker` in the run directory."""
+    if not run_dir:
+        return None
+    try:
+        with open(os.path.join(run_dir, "config-source")) as f:
+            path = f.read().strip()
+    except OSError:
+        return None
+    return path or None
+
+
 def mount_roots(run_dir):
     """The host paths of the configured mounts, longest first.
 
@@ -370,12 +393,13 @@ class Prompt:
     """Shows one permission dialog and returns the chosen decision."""
 
     def __init__(self, no_gui, test_answer, test_request=None, roots=None,
-                 run_dir=None):
+                 run_dir=None, can_remember=False):
         self.no_gui = no_gui
         self.test_answer = test_answer
         self.test_request = test_request
         self.roots = roots or []
         self.run_dir = run_dir
+        self.can_remember = can_remember
         self.queue = []
         self.queue_lock = threading.Lock()
         self.busy = False
@@ -411,18 +435,23 @@ class Prompt:
         return answer["decision"] or dict(DENY_ONCE)
 
     def request(self, path, writable, pid, uid):
-        """Ask the user to add `path` to the virtual root."""
+        """Ask the user to add `path` to the virtual root. Returns a dict:
+        `access` is `ro`, `rw` or None, and `remember` says the answer should
+        outlive this session."""
         if self.test_request:
-            return self.test_request
+            remember = self.test_request.endswith("+remember")
+            access = self.test_request.removesuffix("+remember")
+            return {"access": access if access in ("ro", "rw") else None,
+                    "remember": remember and access in ("ro", "rw")}
         if self.Gtk is None:
-            return "deny"
+            return dict(NO_REQUEST)
 
         answer = {"decision": None, "event": threading.Event()}
         with self.queue_lock:
             self.queue.append(("request", (path, writable, pid, uid), answer))
         self.GLib.idle_add(self._pump)
         answer["event"].wait(DEFAULT_TIMEOUT)
-        return answer["decision"] or "deny"
+        return answer["decision"] or dict(NO_REQUEST)
 
     def _test_decision(self, op, paths, text):
         d = parse_answer(text)
@@ -447,10 +476,11 @@ class Prompt:
                 answer["decision"] = self._show_request(*payload)
         except Exception as e:
             print(f"broker: dialog error: {e}", file=sys.stderr, flush=True)
-            answer["decision"] = ("deny" if kind == "request" else dict(DENY_ONCE))
+            answer["decision"] = (dict(NO_REQUEST) if kind == "request"
+                                  else dict(DENY_ONCE))
         finally:
             answer["decision"] = answer["decision"] or (
-                "deny" if kind == "request" else dict(DENY_ONCE))
+                dict(NO_REQUEST) if kind == "request" else dict(DENY_ONCE))
             answer["event"].set()
             with self.queue_lock:
                 self.busy = False
@@ -532,6 +562,16 @@ class Prompt:
         ])
         dlg.get_content_area().add(grid)
 
+        # Off by default: a request normally lasts for this session only, and
+        # anything longer should be a deliberate choice.
+        remember = Gtk.CheckButton(label="Remember it for future sessions")
+        remember.set_active(False)
+        remember.set_sensitive(self.can_remember)
+        if not self.can_remember:
+            remember.set_tooltip_text(
+                "no config path recorded for this session, so it cannot be made permanent")
+        dlg.get_content_area().add(remember)
+
         dlg.add_button("Deny", 0)
         dlg.add_button("Add read-only", 1)
         dlg.add_button("Add read-write", 2)
@@ -540,13 +580,15 @@ class Prompt:
         self._centre(dlg)
         response = dlg.run()
         if response == 2:
-            scope = "read-write"
+            access = "rw"
         elif response == 1:
-            scope = "read-only"
+            access = "ro"
         else:
-            scope = "deny"
+            access = None
+        keep = (bool(remember.get_active()) and self.can_remember
+                and access is not None)
         dlg.destroy()
-        return scope
+        return {"access": access, "remember": keep}
 
     def _show_ask(self, op, paths, pid, uid):
         Gtk = self.Gtk
@@ -680,8 +722,12 @@ class Broker:
         self.state = State(args.state)
         self.audit = Audit(args.audit)
         self.roots = mount_roots(args.run_dir)
+        self.config_source = read_config_source(args.run_dir)
+        self.sidecar = (f"{self.config_source}.d/mounts.toml"
+                        if self.config_source else None)
         self.prompt = Prompt(args.no_gui, args.test_answer, args.test_request,
-                             roots=self.roots, run_dir=args.run_dir)
+                             roots=self.roots, run_dir=args.run_dir,
+                             can_remember=self.sidecar is not None)
         self.sock_path = args.socket
 
     def handle(self, line):
@@ -748,14 +794,47 @@ class Broker:
         writable = mode == "rw"
 
         answer = self.prompt.request(path, writable, pid, uid)
-        if answer in ("read-write", "rw"):
-            self.audit.log("request", [path], pid, uid, "allow", "read-write")
-            return "ALLOW read-write\n"
-        if answer in ("read-only", "ro"):
-            self.audit.log("request", [path], pid, uid, "allow", "read-only")
-            return "ALLOW read-only\n"
-        self.audit.log("request", [path], pid, uid, "deny", None)
-        return "DENY\n"
+        access = answer.get("access")
+        if access is None:
+            self.audit.log("request", [path], pid, uid, "deny", None)
+            return "DENY\n"
+
+        scope = "read-write" if access == "rw" else "read-only"
+        if answer.get("remember"):
+            if self.remember_mount(path, writable=(access == "rw")):
+                scope += " permanent"
+            else:
+                scope += " (could not be remembered)"
+        self.audit.log("request", [path], pid, uid, "allow", scope)
+        return "ALLOW " + ("read-write" if access == "rw" else "read-only") + "\n"
+
+    def remember_mount(self, path, writable):
+        """Add a mount to the sidecar of approved paths, where the next session
+        will find it. The user's own config is never touched, so anything the
+        manager may remove lives in a file the manager owns."""
+        if not self.sidecar:
+            return False
+        block = f"\n[[mount]]\nhost = \"{path}\"\n"
+        if writable:
+            block += "writable = true\n"
+        try:
+            existing = ""
+            try:
+                with open(self.sidecar) as f:
+                    existing = f.read()
+            except FileNotFoundError:
+                os.makedirs(os.path.dirname(self.sidecar), exist_ok=True)
+                existing = HEADER.format(source=self.config_source or "?")
+            if f'"{path}"' in existing:
+                return True          # already approved; nothing to add
+            with open(self.sidecar, "a") as f:
+                f.write(block)
+            print(f"broker: approved for good: {path}", file=sys.stderr, flush=True)
+            return True
+        except OSError as e:
+            print(f"broker: could not remember {path}: {e}",
+                  file=sys.stderr, flush=True)
+            return False
 
     def ask(self, rest):
         if len(rest) < 4:

@@ -9,6 +9,11 @@
 #   ${run}   the run directory (--run-dir / FSBROKER_RUN_DIR)
 #   ${home}  the sandbox's writable home (default ${run}/home)
 #
+# Mounts you approve for good from an access request are kept beside this file,
+# in <this file>.d/mounts.toml, and loaded as a second list. That is deliberate:
+# a dialog never rewrites the file you wrote, and everything in the sidecar is
+# something you chose from the popup, so the rule manager may remove it.
+#
 # Uncomment to let a different uid use the mount. This is what
 # `fsbroker root-shell` needs: root entering the sandbox's namespaces is refused
 # by FUSE unless the mount allows other users. It also requires uncommenting

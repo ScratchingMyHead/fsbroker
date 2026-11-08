@@ -43,7 +43,8 @@ def report(run_dir):
         rows.sort(key=lambda r: (r[1] != "config", r[2]))
         w = max((len(r[2]) for r in rows), default=4)
         for access, source, vpath, host in rows:
-            src = "config        " if source == "config" else "session request"
+            src = {"config": "config        ",
+                   "permanent": "approved      "}.get(source, "session request")
             note = "" if source == "config" else f"   (-> {host})"
             print(f"  {vpath:<{w}}  {access:<2}  {src}{note}")
 

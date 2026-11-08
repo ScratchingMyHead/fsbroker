@@ -88,9 +88,18 @@ needed for normal operation.
 
 One window per running session, showing the same three things as `status`: the
 visible mounts, the write approvals, and the denials. Anything that did not come
-from the config has a **Remove** button — a folder the agent asked for through an
-access request, or an allow/deny rule from a prompt. Config mounts are listed but
-not removable: only editing the config file and restarting takes those away.
+from the config you wrote has a **Remove** button:
+
+| shown as | came from | Remove does |
+|---|---|---|
+| `config` | your config file | — (not offered) |
+| `approved` | the sidecar, from a remembered request | takes it out of the sidecar *and* unmounts it now |
+| `session request` | an access request this session | unmounts it now |
+| a rule | a prompt's allow/deny | deletes the rule |
+
+So removability follows from where a rule lives, rather than a list of exceptions
+someone has to maintain: your file is yours and the manager never writes to it,
+and the sidecar contains only things you approved from the popup.
 
 The permission dialog has a **Manage rules…** button that opens it, which is the
 point of it being a separate process: you can go and take back a rule you just
@@ -170,9 +179,16 @@ fsbroker-request /home/joe/Documents --write   # read-write
 ```
 
 (on `PATH` inside the sandbox). An **access request** dialog offers `Deny` /
-`Add read-only` / `Add read-write`; approval adds the mapping for the rest of
-the session. It is not written back to the config. The request socket is the
-only socket bound into the sandbox, and it can only ask.
+`Add read-only` / `Add read-write`, plus a **Remember it for future sessions**
+checkbox. Without it the mapping lasts for this session. With it, it is also
+written to a sidecar beside your config — `<config>.d/mounts.toml` — so the next
+session mounts it from the start.
+
+Your config file is never rewritten by a dialog. That is what the sidecar is
+for: everything in it is a decision you made from the popup, so everything in it
+is safe for the rule manager to remove, and nothing in it can be a mount the
+sandbox needs to start. The request socket is the only socket bound into the
+sandbox, and it can only ask.
 
 The agent will not know to use `fsbroker-request` unless you tell it, so give it
 a skill (or system prompt) that says when and how. An example skill is in

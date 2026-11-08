@@ -68,8 +68,29 @@ def query(sock, line, timeout=5):
     return b"".join(chunks).decode(errors="replace").splitlines()
 
 
+def config_source(run_dir):
+    """The config file the session was started with, as recorded by `mount`."""
+    try:
+        with open(os.path.join(run_dir, "config-source")) as f:
+            path = f.read().strip()
+    except OSError:
+        return None
+    return path or None
+
+
+def approved_mounts(run_dir):
+    """The sidecar holding mounts approved for good: a sibling of the config,
+    which is what keeps a dialog from ever rewriting the user's own file."""
+    source = config_source(run_dir)
+    return f"{source}.d/mounts.toml" if source else None
+
+
 def parse_mounts(lines):
-    """(access, source, virtual path, host path) for each visible mount."""
+    """(access, source, virtual path, host path) for each visible mount.
+
+    `source` is `config` (the user's file), `permanent` (approved for good, and
+    so removable) or `runtime` (this session only, from an approved request).
+    """
     out = []
     for ln in lines[1:]:
         p = ln.split(" ", 4)

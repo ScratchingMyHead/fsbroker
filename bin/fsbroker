@@ -50,6 +50,10 @@ done
 HOME_HOST=${HOME_HOST:-$RUN_DIR/home}
 MOUNT="$RUN_DIR/mount"
 RESOLVED="$RUN_DIR/vroot.resolved.toml"
+# Mounts approved for good live beside the config rather than in it, so the
+# hand-written file is never rewritten by a dialog. The daemon loads this as a
+# second, separately-classified list.
+AUTO_MOUNTS="${CONFIG}.d/mounts.toml"
 DAEMON="$REPO/vroot/target/release/vroot"
 LOG_DIR="$RUN_DIR/log"
 
@@ -75,6 +79,9 @@ resolve_config() {
   [ -f "$CONFIG" ] || die "no config file at $CONFIG (copy config/vroot.example.toml)"
   # Expand the two placeholders into a concrete config the daemon reads.
   sed -e "s|\${run}|$RUN_DIR|g" -e "s|\${home}|$HOME_HOST|g" "$CONFIG" > "$RESOLVED"
+  # Record where the config came from, so the broker and the rule manager can
+  # find the sidecar of permanently-approved mounts without being told again.
+  printf '%s\n' "$CONFIG" > "$RUN_DIR/config-source"
 }
 
 prepare_run_dir() {
@@ -199,7 +206,8 @@ cmd_mount() {
   fi
   say "mounting $MOUNT (run dir $RUN_DIR)"
   RUST_LOG=${RUST_LOG:-info} setsid nohup "$DAEMON" \
-    --config "$RESOLVED" --run-dir "$RUN_DIR" --mount-point "$MOUNT" \
+    --config "$RESOLVED" --config-extra "$AUTO_MOUNTS" \
+    --run-dir "$RUN_DIR" --mount-point "$MOUNT" \
     >>"$LOG_DIR/vroot.log" 2>&1 &
   echo $! > "$RUN_DIR/vroot.pid"
   local i
@@ -257,6 +265,7 @@ repo          $REPO
 run dir       $RUN_DIR
 config        $CONFIG
 resolved      $RESOLVED
+approved      $AUTO_MOUNTS
 mount point   $MOUNT
 sandbox home  $HOME_HOST
 sockets       $RUN_DIR/{vroot,broker,request}.sock

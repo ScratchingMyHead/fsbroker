@@ -251,9 +251,15 @@ class Manager(Gtk.Window):
         else:
             for row, (access, source, vpath, host) in enumerate(
                     sorted(proto.parse_mounts(mounts), key=lambda r: r[2])):
-                where = "config" if source == "config" else "session request"
+                where = {"config": "config",
+                         "permanent": "approved"}.get(source, "session request")
                 note = "" if source == "config" else f"   (-> {host})"
-                remove = None if source == "config" else ("mount", vpath)
+                if source == "config":
+                    remove = None
+                elif source == "permanent":
+                    remove = ("permanent", vpath)
+                else:
+                    remove = ("mount", vpath)
                 self.row(grid, row, [vpath + note, access, where], remove,
                          alt=(row % 2 == 1))
 
@@ -297,6 +303,11 @@ class Manager(Gtk.Window):
         try:
             if kind == "mount":
                 reply = proto.query(self.vroot_sock, f"DROP {target}")
+            elif kind == "permanent":
+                # Out of the sidecar, so it stays gone, and out of the live
+                # table, so it goes away now.
+                self.forget(target)
+                reply = proto.query(self.vroot_sock, f"DROP {target}")
             elif kind == "daemon-rule":
                 reply = proto.query(self.vroot_sock, f"REVOKE {target}")
             else:
@@ -311,6 +322,49 @@ class Manager(Gtk.Window):
         finally:
             self.busy = False
         self.populate()
+
+    def forget(self, vpath):
+        """Take one entry out of the sidecar of approved mounts.
+
+        Only blocks naming this path are touched, and only in the sidecar — the
+        hand-written config is never read or written — so a removal can never
+        delete something the sandbox needs to start.
+        """
+        side = proto.approved_mounts(self.run_dir)
+        if not side or not os.path.exists(side):
+            return
+        try:
+            with open(side) as f:
+                lines = f.readlines()
+        except OSError as e:
+            self.error(f"cannot read {side}: {e}")
+            return
+
+        def names_path(block):
+            for line in block:
+                key = line.split("=", 1)[0].strip() if "=" in line else ""
+                if key in ("host", "virtual_path") and f'"{vpath}"' in line:
+                    return True
+            return False
+
+        blocks, current = [], []
+        for line in lines:
+            if line.strip() == "[[mount]]":
+                blocks.append(current)
+                current = [line]
+            else:
+                current.append(line)
+        blocks.append(current)
+
+        try:
+            tmp = side + ".tmp"
+            with open(tmp, "w") as f:
+                for block in blocks:
+                    if not names_path(block):
+                        f.writelines(block)
+            os.replace(tmp, side)
+        except OSError as e:
+            self.error(f"cannot write {side}: {e}")
 
     def error(self, message):
         dlg = Gtk.MessageDialog(transient_for=self, modal=True,

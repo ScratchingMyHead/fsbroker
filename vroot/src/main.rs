@@ -22,7 +22,7 @@ Usage:
   vroot --config <file> --run-dir <dir> [--mount-point <dir>]
   vroot --config <file> [--mount-point <dir>] [--control-socket <path>]
                         [--broker-socket <path>] [--request-socket <path>]
-                        [--read-only]
+                        [--config-extra <file>] [--read-only]
   vroot --config <file> --check <virtual-path>...
   vroot --config <file> --tree
 
@@ -50,6 +50,7 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let mut config_path: Option<PathBuf> = None;
+    let mut config_extra: Option<PathBuf> = None;
     let mut mount_point: Option<PathBuf> = None;
     let mut run_dir: Option<PathBuf> = None;
     let mut control_socket: Option<PathBuf> = None;
@@ -92,6 +93,11 @@ fn main() -> Result<()> {
                     args.next().context("--request-socket needs a path")?,
                 ))
             }
+            "--config-extra" => {
+                config_extra = Some(PathBuf::from(
+                    args.next().context("--config-extra needs a path")?,
+                ))
+            }
             "--read-only" => read_only = true,
             "--check" => checks.push(args.next().context("--check needs a virtual path")?),
             "--tree" => show_tree = true,
@@ -109,6 +115,16 @@ fn main() -> Result<()> {
         cfg.read_only = true;
         for m in &mut cfg.mounts {
             m.writable = false;
+        }
+    }
+
+    // Mounts approved for good live beside the config, so the user's own file is
+    // never rewritten. They are marked as removable in a way the config is not.
+    if let Some(extra) = &config_extra {
+        match config::add_generated(&mut cfg, extra) {
+            Ok(0) => {}
+            Ok(n) => log::info!("{n} permanent mount(s) from {}", extra.display()),
+            Err(e) => log::warn!("ignoring {}: {e}", extra.display()),
         }
     }
 

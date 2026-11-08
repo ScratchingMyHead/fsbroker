@@ -104,7 +104,16 @@ fn dispatch(line: &str, policy: &Arc<Mutex<Policy>>, table: &Arc<RwLock<MountTab
                 out.push_str(&format!(
                     "mount {} {} {} {}\n",
                     if m.writable { "rw" } else { "ro" },
-                    if m.runtime { "runtime" } else { "config" },
+                    // `permanent` is a mount approved for good: it came from the
+                    // sidecar, so the rule manager may remove it, unlike the
+                    // user's own config.
+                    if m.generated {
+                        "permanent"
+                    } else if m.runtime {
+                        "runtime"
+                    } else {
+                        "config"
+                    },
                     m.vpath.display(),
                     m.host.display()
                 ));

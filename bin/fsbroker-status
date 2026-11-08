@@ -17,12 +17,42 @@ import socket
 import sys
 
 
-def run_dir():
+def default_run_dir():
     d = os.environ.get("FSBROKER_RUN_DIR")
     return d or os.path.join(
         os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
         "fsbroker",
     )
+
+
+def discover_run_dirs():
+    """Run directories with a live vroot mount, newest first.
+
+    Every mounted session appears in /proc/self/mounts as `vroot <dir>/mount
+    fuse.vroot`, so the mount table names the run directories without having to
+    guess where they are. A run directory that is mounted but whose daemon has
+    died still shows up, which is the honest answer for it.
+    """
+    found = []
+    try:
+        with open("/proc/self/mounts", "rb") as f:
+            lines = f.read().decode(errors="replace").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        parts = line.split(" ")
+        if len(parts) < 3:
+            continue
+        source, mountpoint, fstype = parts[0], parts[1], parts[2]
+        if source != "vroot" and not fstype.startswith("fuse.vroot"):
+            continue
+        # /proc escapes spaces and friends as octal.
+        mountpoint = (mountpoint.replace("\\040", " ").replace("\\011", "\t")
+                      .replace("\\012", "\n").replace("\\134", "\\"))
+        rd = os.path.dirname(mountpoint.rstrip("/"))
+        if rd and rd not in found:
+            found.append(rd)
+    return found
 
 
 def query(sock, line, timeout=5):
@@ -73,15 +103,9 @@ def section(title):
     print("-" * max(len(title), 40))
 
 
-def main():
-    ap = argparse.ArgumentParser(description="show the sandbox's current access")
-    ap.add_argument("--run-dir", default=run_dir(),
-                    help="runtime directory (env FSBROKER_RUN_DIR)")
-    args = ap.parse_args()
-    vroot_sock = os.path.join(args.run_dir, "vroot.sock")
-    broker_sock = os.path.join(args.run_dir, "broker.sock")
-
-    print("fsbroker — current access")
+def report(run_dir):
+    vroot_sock = os.path.join(run_dir, "vroot.sock")
+    broker_sock = os.path.join(run_dir, "broker.sock")
 
     mounts = query(vroot_sock, "MOUNTS")
     vgrants = query(vroot_sock, "LIST")
@@ -126,6 +150,29 @@ def main():
     else:
         for where, scope, path in sorted(denies, key=lambda g: (g[2], g[0])):
             print(f"  {where:<7} {scope:<12} {path}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="show the sandbox's current access")
+    ap.add_argument("--run-dir", default=None,
+                    help="runtime directory (env FSBROKER_RUN_DIR). Default: "
+                         "every mounted session, from the mount table")
+    args = ap.parse_args()
+
+    if args.run_dir:
+        dirs = [args.run_dir]
+    else:
+        # No run dir and no FSBROKER_RUN_DIR: ask the mount table rather than
+        # guessing a path. Falling back to the default keeps the "nothing is
+        # running" answer useful.
+        dirs = discover_run_dirs() or [default_run_dir()]
+
+    print("fsbroker — current access"
+          + (f"  ({len(dirs)} mounted sessions)" if len(dirs) > 1 else ""))
+    for rd in dirs:
+        print()
+        print(f"run dir: {rd}")
+        report(rd)
 
     print()
     print("Notes: config = permanent (vroot.toml). session request = approved this run.")

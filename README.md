@@ -66,9 +66,15 @@ OpenCode.
 The two commands worth knowing:
 
 ```bash
-bin/fsbroker ... status                              # what the agent can access
-bin/fsbroker-status --run-dir ~/fsbroker_opencode    # the same, standalone
+bin/fsbroker ... status            # what the agent can access
+bin/fsbroker-status                # the same, standalone
 ```
+
+`bin/fsbroker-status` without `--run-dir` finds the running sessions for you:
+a mounted session appears in the mount table as `vroot <run-dir>/mount`, so one
+report is printed per mounted session (there is usually one). Passing
+`--run-dir` (or setting `FSBROKER_RUN_DIR`) still reports exactly that
+directory, mounted or not.
 
 `bin/fsbroker` also has `shell`, `run`, `mount`, `umount`, `broker`,
 `approvals` and `root-shell` for manual use and troubleshooting; none of it is

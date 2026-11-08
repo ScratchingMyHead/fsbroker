@@ -106,7 +106,7 @@ revoked grant makes, and the same caveat as deleting an open file.
 A running session can be entered as real root from the host via tmux (WITH A GREAT DEAL OF CAUTION). The sandboxed agent can access the root tmux with send-keys and capture-pane (more details when you run it). To do so the user should run:
 
 ```bash
-fsbroker/root-tmux.sh
+fsbroker/tmux-root.sh
 ```
 
 It `sudo nsenter`s into the sandbox's mount namespace, so the shell sees only

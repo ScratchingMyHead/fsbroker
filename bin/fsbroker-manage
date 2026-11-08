@@ -137,8 +137,10 @@ class Manager(Gtk.Window):
         buttons.add(refresh)
         outer.add(buttons)
 
-        self.populate()
+        # Show first, then fill in: a socket that is slow to answer should not
+        # hold the window off the screen.
         self.show_all()
+        self.populate()
         # Runs once the main loop starts, by which time the window is mapped.
         if self._want_pos is not None:
             GLib.idle_add(self._place)

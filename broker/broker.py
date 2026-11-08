@@ -837,7 +837,37 @@ class Broker:
 # server
 # --------------------------------------------------------------------------
 
+def serve_one(broker, conn):
+    try:
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > 65536:
+                break
+        line = data.decode(errors="replace").strip()
+        response = broker.handle(line)
+    except Exception as e:  # never let one bad request kill the broker
+        response = f"ERR {e}\n"
+    try:
+        conn.sendall(response.encode())
+    except OSError:
+        pass
+    finally:
+        conn.close()
+
+
 def serve(broker):
+    """Accept connections forever, one thread each.
+
+    An ASK is answered by showing a dialog and waiting for the user, so serving
+    one connection at a time meant everything else that asked during a prompt —
+    the rule manager, `fsbroker-status`, `brokerctl` — sat waiting for the
+    answer and timed out. The prompts themselves are still serialised by the
+    queue in Prompt.
+    """
     path = broker.sock_path
     if os.path.exists(path):
         os.unlink(path)
@@ -853,25 +883,8 @@ def serve(broker):
             conn, _ = srv.accept()
         except OSError:
             break
-        try:
-            data = b""
-            while not data.endswith(b"\n"):
-                chunk = conn.recv(65536)
-                if not chunk:
-                    break
-                data += chunk
-                if len(data) > 65536:
-                    break
-            line = data.decode(errors="replace").strip()
-            response = broker.handle(line)
-        except Exception as e:  # never let one bad request kill the broker
-            response = f"ERR {e}\n"
-        try:
-            conn.sendall(response.encode())
-        except OSError:
-            pass
-        finally:
-            conn.close()
+        threading.Thread(target=serve_one, args=(broker, conn),
+                         daemon=True).start()
 
 
 def main():

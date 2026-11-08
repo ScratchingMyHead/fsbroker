@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# root-tmux.sh — a root tmux inside the sandbox that the sandboxed agent can drive.
+# tmux-root.sh — a root tmux inside the sandbox that the sandboxed agent can drive.
 #
 # You get the foreground client (status bar, keyboard); the agent gets the
 # socket. The session is always named "sandbox-root", so the agent uses:

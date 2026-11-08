@@ -19,7 +19,9 @@ Protocol (one request line, one response line, then close):
     -> PING
     <- OK pong
     -> LIST
-    <- OK <n>\\n grant <scope> <path>...
+    <- OK <n>\\n (grant|deny) <scope> <path>...
+    -> GRANT <scope> <path>          scope: session|always|timed:<seconds>
+    -> DENY <scope> <path>
     -> REVOKE <path>
     <- OK revoked <n> <path>
     -> CLEAR
@@ -27,6 +29,11 @@ Protocol (one request line, one response line, then close):
     -> ASK <op> <pid> <uid> <path> [<path>...]
     <- ALLOW <scope> <path> [<path>...]
     <- DENY
+
+A rule covers a path and everything under it, so the path may be a file (that
+file alone) or a directory. Denials are rules like grants: `once` answers this
+one operation without remembering anything; the rest are remembered until they
+expire or are revoked.
 """
 import argparse
 import json
@@ -44,6 +51,10 @@ TIMED_CHOICES = {              # menu label -> seconds
     "6 hours": 6 * 3600,
     "12 hours": 12 * 3600,
 }
+
+# What a dismissed dialog, a missing GUI or a timeout means: refuse this one
+# operation and remember nothing.
+DENY_ONCE = {"action": "deny", "duration": "once", "secs": None, "path": None}
 
 
 # --------------------------------------------------------------------------
@@ -84,13 +95,16 @@ class State:
             self.grants = [g for g in self.grants
                            if g.get("expiry") is None or g["expiry"] > now]
 
-    def add(self, path, scope, secs=None, ephemeral=False):
-        """Add a grant. `ephemeral` grants (session) are not persisted: they
-        live as long as the broker does, which is how the user thinks of
-        "this session"."""
+    def add(self, path, scope, secs=None, ephemeral=False, kind="allow"):
+        """Add a rule. `ephemeral` rules (session) are not persisted: they live
+        as long as the broker does, which is how the user thinks of "this
+        session". `kind` is "allow" or "deny"; a new rule for a path replaces
+        whatever was there, so an allow and a deny cannot fight over one path.
+        """
         entry = {
             "path": path,
             "scope": scope,
+            "kind": kind,
             "expiry": (time.time() + secs) if secs else None,
             "ephemeral": ephemeral,
             "granted_at": time.time(),
@@ -101,11 +115,18 @@ class State:
             if not ephemeral:
                 self._save()
 
-    def matched_grants(self, paths):
-        """Return the durable grants covering every path, weakest scope first."""
+    def match(self, paths):
+        """The rule covering every path, as (kind, hits), or None.
+
+        Per path the most specific (longest) matching rule wins, so a file rule
+        beats a directory rule that contains it. If any path resolves to a deny
+        the whole decision is a deny: an operation is allowed only when nothing
+        it touches is denied.
+        """
         self.prune()
+        kind = "allow"
+        hits = []
         with self.lock:
-            hits = []
             for p in paths:
                 best = None
                 for g in self.grants:
@@ -115,7 +136,35 @@ class State:
                 if best is None:
                     return None
                 hits.append(best)
-            return hits
+                if best.get("kind", "allow") == "deny":
+                    kind = "deny"
+        return (kind, hits)
+
+    def rewrite(self, src, dst):
+        """Follow a rename: rules naming `src`, or anything under it, move to
+        `dst`. Called when a rename is allowed, so a rule the user set for a
+        path does not go stale just because the path was renamed."""
+        if not src or not dst or not src.startswith("/") or not dst.startswith("/"):
+            return 0
+        src = src.rstrip("/") or "/"
+        prefix = src + "/"
+        with self.lock:
+            changed = 0
+            for g in self.grants:
+                p = g["path"]
+                if p == src:
+                    g["path"] = dst
+                    changed += 1
+                elif p.startswith(prefix):
+                    g["path"] = dst.rstrip("/") + "/" + p[len(prefix):]
+                    changed += 1
+            if changed:
+                seen = {}
+                for g in self.grants:
+                    seen[g["path"]] = g
+                self.grants = list(seen.values())
+                self._save()
+            return changed
 
     def list(self):
         self.prune()
@@ -128,7 +177,7 @@ class State:
                     scope = "always"
                 else:
                     scope = f"timed:{int(g['expiry'] - time.time())}"
-                out.append((scope, g["path"]))
+                out.append((g.get("kind", "allow"), scope, g["path"]))
             return out
 
     def revoke(self, path):
@@ -195,19 +244,121 @@ def proc_field(pid, name):
 # prefix rules
 # --------------------------------------------------------------------------
 
-def prefix_for(op, paths):
-    """The directory an `always`/`session`/`timed` grant should cover."""
-    if op == "rename" and len(paths) == 2:
-        a = os.path.dirname(paths[0])
-        b = os.path.dirname(paths[1])
-        common = os.path.commonpath([a, b])
-        return common if common not in ("", "/") else b
+def mount_roots(run_dir):
+    """The host paths of the configured mounts, longest first.
 
-    p = paths[0]
-    if os.path.isdir(p):
-        return p
-    parent = os.path.dirname(p)
-    return parent or "/"
+    Used to stop the scope picker at the deepest mapping that contains the
+    path: above it nothing is mapped, and a rule there would silently cover
+    every mapped path beneath it.
+    """
+    if not run_dir:
+        return []
+    try:
+        import tomllib
+        with open(os.path.join(run_dir, "vroot.resolved.toml"), "rb") as f:
+            cfg = tomllib.load(f)
+    except (OSError, ValueError, ImportError):
+        return []
+    # The daemon names paths the way the sandbox sees them, so the cap uses
+    # virtual_path (which equals host for identity mappings, and differs for
+    # e.g. /etc, built from the run directory's etc-view).
+    roots = []
+    for m in cfg.get("mount", []):
+        v = m.get("virtual_path") or m.get("host")
+        if v and v.startswith("/"):
+            roots.append(os.path.normpath(v))
+    roots.sort(key=len, reverse=True)
+    return roots
+
+
+def label_for(path, kind="path"):
+    """The picker row text: what choosing this path actually covers.
+
+    `kind` is one of root/dir/file/path, decided by `candidates` (which knows
+    things the filesystem cannot answer, like a rename's common parent).
+    """
+    if kind == "root":
+        name = os.path.basename(path.rstrip("/")) or path
+        return f"{path}   — the whole {name} mapping"
+    if kind == "dir":
+        return f"{path}   — this folder and everything below"
+    if kind == "file":
+        return f"{path}   — just this file"
+    return f"{path}   — just this path"
+
+
+def _kind(path, start, op, root):
+    if path == root:
+        return "root"
+    if op == "rename" and path == start:
+        return "dir"        # the common parent of a rename is a directory
+    if os.path.isdir(path):
+        return "dir"
+    if os.path.exists(path):
+        return "file"
+    return "path"           # e.g. a name being created
+
+
+def candidates(op, paths, roots):
+    """Paths a decision can be scoped to, narrowest first.
+
+    Every row is a valid rule: the matcher covers the path and descendants, so
+    a file row means that file alone. A rename touches two directories, so its
+    narrowest row is their common parent rather than either file. The walk
+    stops at the mount root containing the path (see `mount_roots`).
+    """
+    if op == "rename" and len(paths) >= 2:
+        a, b = os.path.dirname(paths[0]), os.path.dirname(paths[1])
+        try:
+            start = os.path.commonpath([a, b])
+        except ValueError:
+            start = a or b
+    else:
+        start = paths[0]
+    start = os.path.normpath(start) if start else "/"
+
+    root = None
+    for r in roots:
+        if start == r or start.startswith(r.rstrip("/") + "/"):
+            root = r
+            break
+
+    out = []
+    cur = start
+    while True:
+        out.append(cur)
+        if cur == root:
+            break
+        parent = os.path.dirname(cur)
+        if parent == cur:                      # reached /
+            break
+        cur = parent
+        if root is None and len(out) >= 3:     # no config: file + two parents
+            break
+    return [(p, _kind(p, start, op, root)) for p in out]
+
+
+def parse_answer(text):
+    """Parse a `--test-answer` value: `[deny:]<duration>[@<path>]`.
+
+    `once`, `always`, `session`, `timed:600`, `deny:always@/a/b`, `deny`.
+    """
+    if not text:
+        return None
+    kind = "allow"
+    if text.startswith("deny:"):
+        kind, text = "deny", text[len("deny:"):]
+    elif text == "deny":
+        kind, text = "deny", "once"
+    path = None
+    if "@" in text:
+        text, path = text.split("@", 1)
+    secs = None
+    if text.startswith("timed:"):
+        duration, secs = "timed", int(text.split(":", 1)[1])
+    else:
+        duration = text
+    return {"action": kind, "duration": duration, "secs": secs, "path": path}
 
 
 # --------------------------------------------------------------------------
@@ -215,12 +366,13 @@ def prefix_for(op, paths):
 # --------------------------------------------------------------------------
 
 class Prompt:
-    """Shows one permission dialog and returns the chosen scope string."""
+    """Shows one permission dialog and returns the chosen decision."""
 
-    def __init__(self, no_gui, test_answer, test_request=None):
+    def __init__(self, no_gui, test_answer, test_request=None, roots=None):
         self.no_gui = no_gui
         self.test_answer = test_answer
         self.test_request = test_request
+        self.roots = roots or []
         self.queue = []
         self.queue_lock = threading.Lock()
         self.busy = False
@@ -240,18 +392,19 @@ class Prompt:
         return self.Gtk is not None
 
     def ask(self, op, paths, pid, uid):
-        """Block until the user (or the test harness) decides."""
+        """Block until the user (or the test harness) decides. Returns a
+        decision dict: action, duration, secs and the chosen scope path."""
         if self.test_answer:
-            return self.test_answer
+            return self._test_decision(op, paths, self.test_answer)
         if self.Gtk is None:
-            return "deny"
+            return dict(DENY_ONCE)
 
-        answer = {"scope": None, "event": threading.Event()}
+        answer = {"decision": None, "event": threading.Event()}
         with self.queue_lock:
             self.queue.append(("ask", (op, paths, pid, uid), answer))
         self.GLib.idle_add(self._pump)
         answer["event"].wait(DEFAULT_TIMEOUT)
-        return answer["scope"] or "deny"
+        return answer["decision"] or dict(DENY_ONCE)
 
     def request(self, path, writable, pid, uid):
         """Ask the user to add `path` to the virtual root."""
@@ -260,12 +413,20 @@ class Prompt:
         if self.Gtk is None:
             return "deny"
 
-        answer = {"scope": None, "event": threading.Event()}
+        answer = {"decision": None, "event": threading.Event()}
         with self.queue_lock:
             self.queue.append(("request", (path, writable, pid, uid), answer))
         self.GLib.idle_add(self._pump)
         answer["event"].wait(DEFAULT_TIMEOUT)
-        return answer["scope"] or "deny"
+        return answer["decision"] or "deny"
+
+    def _test_decision(self, op, paths, text):
+        d = parse_answer(text)
+        if not d:
+            return dict(DENY_ONCE)
+        if not d.get("path"):
+            d["path"] = candidates(op, paths, self.roots)[0][0]
+        return d
 
     def _pump(self):
         with self.queue_lock:
@@ -277,14 +438,15 @@ class Prompt:
         # unblock the waiting request and free the pump.
         try:
             if kind == "ask":
-                answer["scope"] = self._show_ask(*payload)
+                answer["decision"] = self._show_ask(*payload)
             else:
-                answer["scope"] = self._show_request(*payload)
+                answer["decision"] = self._show_request(*payload)
         except Exception as e:
             print(f"broker: dialog error: {e}", file=sys.stderr, flush=True)
-            answer["scope"] = "deny"
+            answer["decision"] = ("deny" if kind == "request" else dict(DENY_ONCE))
         finally:
-            answer["scope"] = answer["scope"] or "deny"
+            answer["decision"] = answer["decision"] or (
+                "deny" if kind == "request" else dict(DENY_ONCE))
             answer["event"].set()
             with self.queue_lock:
                 self.busy = False
@@ -335,10 +497,13 @@ class Prompt:
 
     def _show_ask(self, op, paths, pid, uid):
         Gtk = self.Gtk
+        cands = candidates(op, paths, self.roots)
+
         dlg = Gtk.Dialog(title="fsbroker — permission request")
-        dlg.set_default_size(560, -1)
+        dlg.set_default_size(620, -1)
         dlg.set_resizable(False)
         dlg.set_keep_above(True)
+        content = dlg.get_content_area()
 
         grid = Gtk.Grid(column_spacing=12, row_spacing=6, margin=12)
         self._details(Gtk, grid, [
@@ -348,12 +513,65 @@ class Prompt:
             ("Working dir", safe_readlink(f"/proc/{pid}/cwd") or "?"),
             ("User", str(uid)),
         ])
-        dlg.get_content_area().add(grid)
+        content.add(grid)
+
+        # What the decision covers. The first row is the narrowest: the file (or
+        # the common parent for a rename), then each ancestor up to the mount
+        # root. A deny uses the same choice, so "always deny this folder" works.
+        target_grid = Gtk.Grid(column_spacing=12, row_spacing=6, margin=12)
+        target_label = Gtk.Label(label="Applies to:", xalign=0)
+        target_label.get_style_context().add_class("dim-label")
+        combo = Gtk.ComboBoxText()
+        for path, kind in cands:
+            combo.append_text(label_for(path, kind))
+        combo.set_active(0)
+        target_grid.attach(target_label, 0, 0, 1, 1)
+        target_grid.attach(combo, 1, 0, 1, 1)
+        content.add(target_grid)
+
+        # For how long. The amount for "timed" is chosen from its own menu; the
+        # default is the first entry, so the radio is usable without a second
+        # click.
+        dur_grid = Gtk.Grid(column_spacing=12, row_spacing=6, margin=12)
+        dur_label = Gtk.Label(label="Duration:", xalign=0)
+        dur_label.get_style_context().add_class("dim-label")
+        dur_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        once = Gtk.RadioButton.new_with_label(None, "once")
+        session = Gtk.RadioButton.new_with_label_from_widget(once, "session")
+        timed = Gtk.RadioButton.new_with_label_from_widget(once, "timed")
+        always = Gtk.RadioButton.new_with_label_from_widget(once, "always")
+        once.set_active(True)
+
+        default_label, default_secs = next(iter(TIMED_CHOICES.items()))
+        chosen = {"secs": default_secs}
+        timed_menu = Gtk.Menu()
+        for label, secs in TIMED_CHOICES.items():
+            item = Gtk.MenuItem(label=label)
+
+            def pick(_w, s=secs, lbl=label):
+                chosen["secs"] = s
+                timed.set_active(True)
+                timed_button.set_label(f"timed: {lbl}")
+
+            item.connect("activate", pick)
+            timed_menu.append(item)
+        timed_menu.show_all()
+        timed_button = Gtk.MenuButton(label=f"timed: {default_label}")
+        timed_button.set_popup(timed_menu)
+
+        dur_box.add(once)
+        dur_box.add(session)
+        dur_box.add(timed)
+        dur_box.add(timed_button)
+        dur_box.add(always)
+        dur_grid.attach(dur_label, 0, 0, 1, 1)
+        dur_grid.attach(dur_box, 1, 0, 1, 1)
+        content.add(dur_grid)
 
         # Buttons live in the content area, not the dialog action area:
         # `add_action_widget` would make the MenuButton "activate" the dialog
         # (closing it) instead of opening its menu, and `get_action_area` is
-        # deprecated. A plain `ButtonBox` gives us the dropdown we want.
+        # deprecated. A plain `ButtonBox` keeps that behaviour.
         buttons = Gtk.ButtonBox(
             orientation=Gtk.Orientation.HORIZONTAL,
             spacing=6,
@@ -362,49 +580,36 @@ class Prompt:
         buttons.set_layout(Gtk.ButtonBoxStyle.END)
         deny = Gtk.Button(label="Deny")
         deny.connect("clicked", lambda *_: dlg.response(0))
-        once = Gtk.Button(label="Allow once")
-        once.connect("clicked", lambda *_: dlg.response(1))
-        session = Gtk.Button(label="This session")
-        session.connect("clicked", lambda *_: dlg.response(2))
-        always = Gtk.Button(label="Always")
-        always.connect("clicked", lambda *_: dlg.response(3))
+        allow = Gtk.Button(label="Allow")
+        allow.connect("clicked", lambda *_: dlg.response(1))
         buttons.add(deny)
-        buttons.add(once)
-        buttons.add(session)
-        buttons.add(always)
+        buttons.add(allow)
+        content.add(buttons)
 
-        # The dropdown keeps only the fixed durations.
-        menu = Gtk.Menu()
-        ids = {}
-        nid = 10
-        for label, secs in TIMED_CHOICES.items():
-            item = Gtk.MenuItem(label=label)
-            ids[nid] = f"timed:{secs}"
-            item.connect("activate", lambda _w, i=nid: dlg.response(i))
-            menu.append(item)
-            nid += 1
-        menu.show_all()
-
-        more = Gtk.MenuButton(label="Allow for…")
-        more.set_popup(menu)
-        buttons.add(more)
-
-        dlg.get_content_area().add(buttons)
         dlg.show_all()
         response = dlg.run()
 
-        if response in (0, Gtk.ResponseType.DELETE_EVENT, Gtk.ResponseType.NONE):
-            scope = "deny"
-        elif response == 1:
-            scope = "once"
-        elif response == 2:
-            scope = "session"
-        elif response == 3:
-            scope = "always"
+        if response not in (0, 1):
+            dlg.destroy()
+            return dict(DENY_ONCE)
+
+        index = combo.get_active()
+        path = cands[index][0] if 0 <= index < len(cands) else cands[0][0]
+        if session.get_active():
+            duration = "session"
+        elif timed.get_active():
+            duration = "timed"
+        elif always.get_active():
+            duration = "always"
         else:
-            scope = ids.get(response, "deny")
+            duration = "once"
         dlg.destroy()
-        return scope
+        return {
+            "action": "allow" if response == 1 else "deny",
+            "duration": duration,
+            "secs": chosen["secs"] if duration == "timed" else None,
+            "path": path,
+        }
 
 
 # --------------------------------------------------------------------------
@@ -415,7 +620,9 @@ class Broker:
     def __init__(self, args):
         self.state = State(args.state)
         self.audit = Audit(args.audit)
-        self.prompt = Prompt(args.no_gui, args.test_answer, args.test_request)
+        self.roots = mount_roots(args.run_dir)
+        self.prompt = Prompt(args.no_gui, args.test_answer, args.test_request,
+                             roots=self.roots)
         self.sock_path = args.socket
 
     def handle(self, line):
@@ -428,26 +635,30 @@ class Broker:
             return "OK pong\n"
 
         if cmd == "LIST":
-            grants = self.state.list()
-            out = [f"OK {len(grants)}"]
-            out += [f"grant {scope} {path}" for scope, path in grants]
+            rules = self.state.list()
+            out = [f"OK {len(rules)}"]
+            out += [f"{'grant' if kind == 'allow' else 'deny'} {scope} {path}"
+                    for kind, scope, path in rules]
             return "\n".join(out) + "\n"
 
-        if cmd == "GRANT":
+        if cmd in ("GRANT", "DENY"):
             if len(parts) != 3:
-                return "ERR usage: GRANT <always|timed:seconds> <path>\n"
+                return f"ERR usage: {cmd} <session|always|timed:seconds> <path>\n"
+            kind = "allow" if cmd == "GRANT" else "deny"
             scope, path = parts[1], parts[2]
+            if not path.startswith("/"):
+                return "ERR path must be absolute\n"
             if scope == "session":
-                self.state.add(path, "session", ephemeral=True)
-                return f"OK granted session {path}\n"
+                self.state.add(path, "session", ephemeral=True, kind=kind)
+                return f"OK {kind} session {path}\n"
             if scope == "always":
-                self.state.add(path, "always")
-                return f"OK granted always {path}\n"
+                self.state.add(path, "always", kind=kind)
+                return f"OK {kind} always {path}\n"
             if scope.startswith("timed:"):
                 secs = int(scope.split(":", 1)[1])
-                self.state.add(path, "timed", secs)
-                return f"OK granted timed:{secs} {path}\n"
-            return "ERR scope must be always or timed:<seconds>\n"
+                self.state.add(path, "timed", secs=secs, kind=kind)
+                return f"OK {kind} timed:{secs} {path}\n"
+            return "ERR scope must be session, always or timed:<seconds>\n"
 
         if cmd == "REVOKE":
             if len(parts) != 2:
@@ -493,39 +704,63 @@ class Broker:
         op, pid, uid = rest[0], rest[1], rest[2]
         paths = rest[3:]
 
-        hits = self.state.matched_grants(paths)
-        if hits is not None:
+        match = self.state.match(paths)
+        if match is not None:
+            kind, hits = match
+            if kind == "deny":
+                self.audit.log(op, paths, pid, uid, "deny", "cached")
+                return "DENY\n"
             scope = self._combined_scope(hits)
             prefixes = sorted({h["path"] for h in hits})
             self.audit.log(op, paths, pid, uid, "allow", f"cached {scope}")
+            self._follow_rename(op, paths)
             return "ALLOW " + scope + " " + " ".join(prefixes) + "\n"
 
         answer = self.prompt.ask(op, paths, pid, uid)
-        if answer == "deny":
-            self.audit.log(op, paths, pid, uid, "deny", None)
+        action = answer.get("action", "deny")
+        duration = answer.get("duration", "once")
+        target = answer.get("path") or candidates(op, paths, self.roots)[0][0]
+
+        if action == "deny":
+            if duration == "once":
+                self.audit.log(op, paths, pid, uid, "deny", "once")
+                return "DENY\n"
+            scope = self._remember(target, duration, answer.get("secs"), "deny")
+            self.audit.log(op, paths, pid, uid, "deny", f"{scope} {target}")
             return "DENY\n"
 
-        if answer == "once":
+        if duration == "once":
             self.audit.log(op, paths, pid, uid, "allow", "once")
+            self._follow_rename(op, paths)
             return "ALLOW once " + " ".join(paths) + "\n"
 
-        prefix = prefix_for(op, paths)
-        if answer == "session":
-            self.state.add(prefix, "session", ephemeral=True)
-            scope = "session"
-        elif answer == "always":
-            self.state.add(prefix, "always")
-            scope = "always"
-        elif answer.startswith("timed:"):
-            secs = int(answer.split(":", 1)[1])
-            self.state.add(prefix, "timed", secs)
-            scope = f"timed:{secs}"
-        else:
-            self.audit.log(op, paths, pid, uid, "deny", f"bad answer {answer}")
+        scope = self._remember(target, duration, answer.get("secs"), "allow")
+        if scope == "once":
+            self.audit.log(op, paths, pid, uid, "deny", f"bad duration {duration}")
             return "DENY\n"
 
-        self.audit.log(op, paths, pid, uid, "allow", f"{scope} {prefix}")
-        return f"ALLOW {scope} {prefix}\n"
+        self.audit.log(op, paths, pid, uid, "allow", f"{scope} {target}")
+        self._follow_rename(op, paths)
+        return f"ALLOW {scope} {target}\n"
+
+    def _remember(self, path, duration, secs, kind):
+        """Store a rule and return its scope string, or "once" if the duration
+        is not one we persist."""
+        if duration == "session":
+            self.state.add(path, "session", ephemeral=True, kind=kind)
+            return "session"
+        if duration == "always":
+            self.state.add(path, "always", kind=kind)
+            return "always"
+        if duration == "timed":
+            self.state.add(path, "timed", secs=secs, kind=kind)
+            return f"timed:{secs}"
+        return "once"
+
+    def _follow_rename(self, op, paths):
+        """Keep rules pointing at the right path when something is renamed."""
+        if op == "rename" and len(paths) >= 2:
+            self.state.rewrite(paths[0], paths[1])
 
     @staticmethod
     def _combined_scope(hits):
@@ -601,6 +836,7 @@ def main():
         os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
         "fsbroker",
     )
+    args.run_dir = run
     args.socket = args.socket or os.path.join(run, "broker.sock")
     args.state = args.state or os.path.join(run, "broker-state.json")
     args.audit = args.audit or os.path.join(run, "audit.log")

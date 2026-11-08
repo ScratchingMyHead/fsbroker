@@ -13,7 +13,7 @@
 #   session [--] <cmd>    mount + broker + run, then tear down
 #   root-shell [--] [cmd ...]  enter the running session as root (needs allow_other)
 #   status                show what the agent can currently access
-#   approvals [cmd...]    the broker's remembered write approvals (default: list)
+#   approvals [cmd...]    the broker's remembered allow/deny rules (default: list)
 #   paths                 print the resolved locations and exit
 #   help
 #

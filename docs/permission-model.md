@@ -73,9 +73,11 @@ does not extend to `/home/rj/projects/bar`. Nothing edits the config behind the
 user's back; there is a list/revoke command.
 
 If the prompt is not answered within the timeout (5 minutes at the daemon,
-4 minutes at the broker) the operation is denied. An explicit denial is
-remembered for 60 seconds so a retry loop fails fast instead of re-prompting,
-without making a later grant take effect only after a restart.
+4 minutes at the broker) the operation is denied. A denial is a rule like a
+grant: `once` refuses that one operation and remembers nothing, while
+`session`, `timed` and `always` are remembered by the broker and refused
+without a dialog, scoped to the path the user picked (a file, or a folder and
+its subtree). The rule set is what `fsbroker approvals` lists.
 
 ## Trust boundary
 

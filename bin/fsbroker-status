@@ -56,11 +56,14 @@ def parse_mounts(lines):
 
 
 def parse_grants(lines):
+    """(kind, scope, path) for each `grant`/`deny` rule."""
     out = []
     for ln in lines[1:]:
-        if ln.startswith("grant "):
-            _, scope, path = ln.split(" ", 2)
-            out.append((scope, path))
+        for kind in ("grant", "deny"):
+            if ln.startswith(kind + " "):
+                _, scope, path = ln.split(" ", 2)
+                out.append((kind, scope, path))
+                break
     return out
 
 
@@ -100,23 +103,34 @@ def main():
 
     # --- write approvals --------------------------------------------------
     section("WRITE APPROVALS — modifications allowed with no prompt")
-    grants = []
-    if bgrants is not None:
-        grants += [("broker", s, p) for s, p in parse_grants(bgrants)]
-    if vgrants is not None:
-        grants += [("daemon", s, p) for s, p in parse_grants(vgrants)]
-    if not grants:
+    allows = []
+    denies = []
+    for source, lines in (("broker", bgrants), ("daemon", vgrants)):
+        if lines is None:
+            continue
+        for kind, scope, path in parse_grants(lines):
+            (allows if kind == "grant" else denies).append((source, scope, path))
+
+    if not allows:
         if vgrants is None and bgrants is None:
             print("  (neither daemon nor broker is running)")
         else:
             print("  (none — every write to a read-only path prompts)")
     else:
-        w = max(len(p) for _, _, p in grants)
-        for where, scope, path in sorted(grants, key=lambda g: (g[2], g[0])):
+        for where, scope, path in sorted(allows, key=lambda g: (g[2], g[0])):
+            print(f"  {where:<7} {scope:<12} {path}")
+
+    section("DENIALS — modifications refused with no prompt")
+    if not denies:
+        print("  (none)")
+    else:
+        for where, scope, path in sorted(denies, key=lambda g: (g[2], g[0])):
             print(f"  {where:<7} {scope:<12} {path}")
 
     print()
     print("Notes: config = permanent (vroot.toml). session request = approved this run.")
+    print("       A rule covers its path and everything under it: a file path")
+    print("       covers that file alone, a folder path covers its subtree.")
     print("       Anything not listed above is ENOENT to the agent.")
 
 

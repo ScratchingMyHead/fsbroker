@@ -4,7 +4,8 @@
 Usage:
   brokerctl [--run-dir <dir>] ping
   brokerctl [--run-dir <dir>] list
-  brokerctl [--run-dir <dir>] grant <always|session|timed:seconds> <absolute path>
+  brokerctl [--run-dir <dir>] grant <session|always|timed:seconds> <absolute path>
+  brokerctl [--run-dir <dir>] deny  <session|always|timed:seconds> <absolute path>
   brokerctl [--run-dir <dir>] revoke <absolute path>
   brokerctl [--run-dir <dir>] clear
   brokerctl [--run-dir <dir>] ask <op> <pid> <uid> <absolute path> [<path>...]
@@ -78,10 +79,11 @@ def main(argv):
     cmd = argv[0]
     if cmd in ("ping", "list", "clear"):
         line = cmd.upper()
-    elif cmd == "grant":
+    elif cmd in ("grant", "deny"):
         if len(argv) != 3 or not argv[2].startswith("/"):
-            sys.exit("brokerctl: grant needs <always|session|timed:seconds> <absolute path>")
-        line = f"GRANT {argv[1]} {argv[2]}"
+            sys.exit(f"brokerctl: {cmd} needs "
+                     "<session|always|timed:seconds> <absolute path>")
+        line = f"{cmd.upper()} {argv[1]} {argv[2]}"
     elif cmd == "revoke":
         if len(argv) != 2 or not argv[1].startswith("/"):
             sys.exit("brokerctl: revoke needs <absolute path>")

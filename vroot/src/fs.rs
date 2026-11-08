@@ -443,10 +443,6 @@ impl VrootFs {
                 debug!("grant: {op} allowed for {}", describe(paths));
                 return Ok(());
             }
-            if paths.iter().any(|v| p.is_denied(v)) {
-                warn!("deny: {op} on previously denied path {}", describe(paths));
-                return Err(libc::EACCES);
-            }
         }
 
         let Some(sock) = self.broker.clone() else {
@@ -470,10 +466,9 @@ impl VrootFs {
                 Ok(())
             }
             Decision::Deny => {
-                let mut p = self.policy.lock().unwrap();
-                for v in paths {
-                    p.deny(v.to_path_buf());
-                }
+                // Nothing is remembered here: a denial the user wants to stick
+                // is a rule the broker holds, and it answers without prompting.
+                // A one-off "deny" is simply this operation failing.
                 warn!("deny: broker refused {op} on {}", describe(paths));
                 Err(libc::EACCES)
             }

@@ -97,29 +97,42 @@ the run directory is tightened to `0700`.
 
 **Change something read-only.** A write to a read-only mapping blocks and raises
 a dialog naming the operation, path, requesting process, working directory and
-user. Choices: `Deny`, `Allow once`, and `Allow for…` → `10 minutes` / `1 hour`
-/ `6 hours` / `12 hours` / `This session` / `Always`.
+user. It has three controls:
 
-- `once` is exactly the one operation.
-- `This session` is remembered by the broker until it stops.
-- `timed` and `Always` are stored in `<run>/broker-state.json` and survive a
-  restart (`Always` = don't ask again in future runs).
+- **Applies to** — how wide the decision is. The first row is the narrowest: the
+  file itself, or for a `rename` the folder the two ends share. Below it is one
+  row per ancestor folder, up to the mount that contains the path (the last row
+  is labelled as the whole mapping). Above the mapping there is nothing to
+  reach, and a rule there would silently cover every mapped path beneath it, so
+  the list stops there.
+- **Duration** — `once`, `session`, `timed` (with a menu for `10 minutes` /
+  `1 hour` / `6 hours` / `12 hours`) or `always`.
+- **Deny** or **Allow**.
+
+- `once` is exactly that one operation, and remembers nothing.
+- `session` is remembered by the broker until it stops.
+- `timed` and `always` are stored in `<run>/broker-state.json` and survive a
+  restart (`always` = don't ask again in future runs).
 - Every decision is appended to `<run>/audit.log` as one JSON line.
 
-What a decision covers, and for how long:
+What a rule covers, and for how long:
 
-- **Allow once** — exactly that one operation on that path; nothing is
-  remembered.
-- **This session / 10 minutes … / Always** — scoped to the **directory**. Acting
-  on a file grants the directory that contains it; acting on a directory grants
-  that directory; a `rename` grants the common parent of both ends. So approving
-  one write in a folder stops the prompt for the rest of that folder, for as long
-  as the grant lasts.
-- **Deny** — remembered by the daemon for **60 seconds**, per **exact path** (the
-  item the operation named, and anything under it if it is a folder). A retry in
-  that window fails immediately with `EACCES` instead of prompting; a different
-  file in the same folder still prompts, and after 60 seconds the denied path
-  prompts again. Denials are not persisted and clear when the daemon stops.
+- **once** — that one operation only; nothing is remembered, so the next
+  identical operation asks again (allow or deny alike).
+- **session / 10 minutes … / always** — the chosen path **and everything under
+  it**. Choosing a file row is exactly that file (the matcher compares path
+  components, so `/a/foo` does not cover `/a/foobar`); choosing a folder row
+  covers its whole subtree, which is how you approve one file, one project, or
+  a whole mapping.
+- **Deny** works the same way: denying a folder stops prompts for everything
+  under it for as long as the denial lasts, and a retry fails with `EACCES`
+  without a dialog. `once` denies a single operation.
+- The most specific rule wins, and a deny anywhere in an operation's paths beats
+  an allow.
+- Renaming something moves the rules that named it: a rule for `/a/f` becomes a
+  rule for the new path, and rules under a renamed folder follow it too.
+- `fsbroker approvals` (or `fsbroker status`) lists the current rules, denials
+  included.
 
 **Add a folder it cannot see.** Paths outside the mapping set are `ENOENT` and
 are deliberately *not* prompted for. The agent asks explicitly:

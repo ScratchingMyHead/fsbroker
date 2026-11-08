@@ -8,9 +8,9 @@
 //! * `timed` — for a fixed duration (the prompt broker's "allow for 10 min"…).
 //!
 //! Grants are added through the host-only control socket, or by the daemon
-//! itself after it asks the prompt broker. A path the user explicitly denied is
-//! remembered for the session so a retry loop fails fast instead of
-//! re-prompting.
+//! itself after it asks the prompt broker. Denials are not remembered here: a
+//! denial that should persist is a rule the broker holds, and it answers the
+//! next ask without prompting.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -59,21 +59,14 @@ impl Grant {
     }
 }
 
-/// How long an explicit "no" suppresses re-prompting for the same path. Short
-/// enough that a grant the user makes afterwards takes effect promptly, long
-/// enough to absorb a retry loop.
-const DENY_TTL: Duration = Duration::from_secs(60);
-
 #[derive(Default)]
 pub struct Policy {
     grants: Vec<Grant>,
-    denied: Vec<(PathBuf, Instant)>,
 }
 
 impl Policy {
     pub fn grant(&mut self, path: PathBuf, scope: Scope) {
         self.grants.retain(|g| g.path != path);
-        self.denied.retain(|(d, _)| d != &path);
         let expires = match scope {
             Scope::Timed(d) => Some(Instant::now() + d),
             _ => None,
@@ -85,29 +78,13 @@ impl Policy {
         });
     }
 
-    /// Remember that the user said no to `path`, so a retry loop fails fast
-    /// instead of re-prompting.
-    pub fn deny(&mut self, path: PathBuf) {
-        let deadline = Instant::now() + DENY_TTL;
-        self.denied.retain(|(d, _)| d != &path);
-        self.denied.push((path, deadline));
-    }
-
-    pub fn is_denied(&mut self, v: &Path) -> bool {
-        let now = Instant::now();
-        self.denied.retain(|(_, deadline)| *deadline > now);
-        self.denied.iter().any(|(d, _)| v.starts_with(d))
-    }
-
     pub fn revoke(&mut self, path: &Path) -> usize {
         let before = self.grants.len();
         self.grants.retain(|g| g.path != path);
-        self.denied.retain(|(d, _)| d != path);
         before - self.grants.len()
     }
 
     pub fn clear(&mut self) -> usize {
-        self.denied.clear();
         let n = self.grants.len();
         self.grants.clear();
         n

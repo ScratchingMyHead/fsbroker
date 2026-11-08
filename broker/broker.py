@@ -462,6 +462,39 @@ class Prompt:
             grid.attach(lab, 0, i, 1, 1)
             grid.attach(val, 1, i, 1, 1)
 
+    def _centre(self, dlg):
+        """Put the dialog in the middle of the screen the pointer is on.
+
+        These windows have no parent, so the window manager places them and
+        tends to cascade a run of them off to one side. Ask GTK for the centre
+        as well, and once the window has a size, move it there explicitly —
+        the position hint alone is not always honoured.
+        """
+        Gtk = self.Gtk
+        try:
+            dlg.set_position(Gtk.WindowPosition.CENTER_ALWAYS)
+        except Exception:
+            pass
+        try:
+            from gi.repository import Gdk
+            display = Gdk.Display.get_default()
+            monitor = None
+            seat = display.get_default_seat()
+            if seat is not None:
+                pointer = seat.get_pointer()
+                if pointer is not None:
+                    _screen, x, y = pointer.get_position()
+                    monitor = display.get_monitor_at_point(x, y)
+            monitor = (monitor or display.get_primary_monitor()
+                       or display.get_monitor(0))
+            geo = monitor.get_geometry()
+            w, h = dlg.get_allocated_width(), dlg.get_allocated_height()
+            dlg.move(geo.x + max(0, (geo.width - w) // 2),
+                     geo.y + max(0, (geo.height - h) // 2))
+        except Exception as e:
+            print(f"broker: could not centre the dialog: {e}",
+                  file=sys.stderr, flush=True)
+
     def _show_request(self, path, writable, pid, uid):
         Gtk = self.Gtk
         dlg = Gtk.Dialog(title="fsbroker — access request")
@@ -485,6 +518,7 @@ class Prompt:
         dlg.add_button("Add read-write", 2)
 
         dlg.show_all()
+        self._centre(dlg)
         response = dlg.run()
         if response == 2:
             scope = "read-write"
@@ -587,6 +621,7 @@ class Prompt:
         content.add(buttons)
 
         dlg.show_all()
+        self._centre(dlg)
         response = dlg.run()
 
         if response not in (0, 1):

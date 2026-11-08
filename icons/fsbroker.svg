@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- A padlock on a slate tile: the tool's job is deciding what may be
+       unlocked. Kept to a few bold shapes so it survives 16px in a task bar. -->
+  <rect x="16" y="16" width="224" height="224" rx="44" fill="#35506e"/>
+  <path d="M88 120V96a40 40 0 0 1 80 0v24" fill="none" stroke="#e8eef5"
+        stroke-width="20" stroke-linecap="round"/>
+  <rect x="64" y="112" width="128" height="96" rx="16" fill="#e8eef5"/>
+  <circle cx="128" cy="148" r="14" fill="#35506e"/>
+  <rect x="120" y="154" width="16" height="32" rx="8" fill="#35506e"/>
+</svg>

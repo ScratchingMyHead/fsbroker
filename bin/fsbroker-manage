@@ -33,6 +33,16 @@ SECTIONS = (
 )
 
 
+def default_icon():
+    """A window with no icon of its own gets a placeholder in the task bar."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in ("fsbroker.png", "fsbroker.svg"):
+        path = os.path.normpath(os.path.join(here, os.pardir, "icons", name))
+        if os.path.exists(path):
+            return path
+    return None
+
+
 def geometry_path():
     base = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
     return os.path.join(base, "fsbroker", "manage-window.json")
@@ -385,6 +395,13 @@ def main():
         dirs = [args.run_dir]
     else:
         dirs = proto.discover_run_dirs() or [proto.default_run_dir()]
+
+    icon = default_icon()
+    if icon:
+        try:
+            Gtk.Window.set_default_icon_from_file(icon)
+        except Exception as e:
+            print(f"fsbroker-manage: could not load {icon}: {e}", file=sys.stderr)
 
     # Alternating row shading, so a Remove button is visibly tied to its row.
     # Translucent grey rather than a fixed colour, so it reads on light and dark

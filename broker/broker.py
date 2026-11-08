@@ -255,6 +255,17 @@ def proc_field(pid, name):
 # prefix rules
 # --------------------------------------------------------------------------
 
+def default_icon():
+    """The prompts are windows too, and get the same placeholder in the task bar
+    without an icon of their own."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in ("fsbroker.png", "fsbroker.svg"):
+        path = os.path.normpath(os.path.join(here, os.pardir, "icons", name))
+        if os.path.exists(path):
+            return path
+    return None
+
+
 def read_config_source(run_dir):
     """The config file the session was started with, as recorded by
     `bin/fsbroker` in the run directory."""
@@ -996,6 +1007,13 @@ def main():
 
     if broker.prompt.available():
         from gi.repository import Gtk
+        icon = default_icon()
+        if icon:
+            try:
+                Gtk.Window.set_default_icon_from_file(icon)
+            except Exception as e:
+                print(f"broker: could not load icon {icon}: {e}",
+                      file=sys.stderr, flush=True)
         signal.signal(signal.SIGINT, signal.SIG_DFL)
         signal.signal(signal.SIGTERM, lambda *_: Gtk.main_quit())
         threading.Thread(target=serve, args=(broker,), daemon=True).start()

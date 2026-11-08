@@ -11,7 +11,7 @@
 #   shell                 start a shell inside the sandbox
 #   run [--] <cmd> ...    run a command inside the sandbox
 #   session [--] <cmd>    mount + broker + run, then tear down
-#   root-shell [shell]    enter the running session as root (needs allow_other)
+#   root-shell [--] [cmd ...]  enter the running session as root (needs allow_other)
 #   status                show what the agent can currently access
 #   approvals [cmd...]    the broker's remembered write approvals (default: list)
 #   paths                 print the resolved locations and exit
@@ -322,7 +322,7 @@ cmd_session() {
 # accident. Requires `allow_other = true` (see cmd_mount).
 cmd_root_shell() {
   [ "${1:-}" = "--" ] && shift
-  local sh=${1:-${SHELL:-/bin/bash}}
+  [ $# -gt 0 ] || set -- "${SHELL:-/bin/bash}"
   is_mounted || die "the virtual root is not mounted; run: fsbroker mount"
   [ -f "$RUN_DIR/sandbox.pid" ] \
     || die "no sandbox is running for $RUN_DIR (start one with: session)"
@@ -335,7 +335,7 @@ cmd_root_shell() {
   [ -n "$apppid" ] || die "cannot find the sandboxed process under pid $bpid"
   say "entering the sandbox as root (sandbox pid $apppid)"
   say "the virtual root still applies; leaving it would take deliberate effort"
-  exec sudo nsenter -t "$apppid" -m -p -- "$sh"
+  exec sudo nsenter -t "$apppid" -m -p -- "$@"
 }
 
 # The usage text is the comment block at the top of this file: print it up to

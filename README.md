@@ -5,7 +5,8 @@ a host-side broker grant it more access to the actual filesystem with a desktop
 popup. This provides protection against an agentic harness accidentally harming
 data outside allowed locations without fully restricting the agent to a virtual
 filesystem. e.g. performing system administration on the host system without
-dangerously broad file access.
+dangerously broad file access. This would not stand up to a malicious agent
+intentionally trying to circumvent it.
 
 The sandbox root is a FUSE virtual root (`vroot`): it exposes only the
 directories listed in a config file, at their real host paths, and returns
@@ -75,14 +76,14 @@ needed for normal operation.
 
 ## A root shell that still sees only the sandbox
 
-A running session can be entered as real root from the host:
+A running session can be entered as real root from the host via tmux (WITH A GREAT DEAL OF CAUTION). The sandboxed agent can access the root tmux with send-keys and capture-pane (more details when you run it). To do so the user should run:
 
 ```bash
-bin/fsbroker ... root-shell
+fsbroker/root-tmux.sh
 ```
 
 It `sudo nsenter`s into the sandbox's mount namespace, so the shell sees only
-the mapped paths: anything unmapped is `ENOENT`, read-only mappings still refuse
+the sandbox mapped paths: anything unmapped is `ENOENT`, read-only mappings still refuse
 writes, and write prompts still come from the broker. Privileges are the host's,
 so root can deliberately leave the namespace; the point is that it cannot reach
 anything by accident.

@@ -32,6 +32,8 @@ fsbroker/
 │   └── brokerctl          host-side client
 ├── config/
 │   └── vroot.example.toml a starting config
+├── examples/
+│   └── skill/request-access/SKILL.md  example agent skill for asking to add a folder
 ├── docs/                  design notes and phase reports
 └── prototype/             development-only experiments (phase 1/2), not used
                            at runtime
@@ -147,6 +149,14 @@ fsbroker-request /home/rj/Documents --write   # read-write
 `Add read-only` / `Add read-write`; approval adds the mapping for the rest of
 the session. It is not written back to the config. The request socket is the
 only socket bound into the sandbox, and it can only ask.
+
+The agent will not know to use `fsbroker-request` unless you tell it, so give it
+a skill (or system prompt) that says when and how. An example skill is in
+`examples/skill/request-access/SKILL.md`. For the OpenCode desktop app, copy it
+into the sandbox home's skill directory, e.g.
+`<run>/home/.config/opencode/skill/request-access/SKILL.md`. The only
+fsbroker-specific part is the `fsbroker-request` command; adapt the wording for
+any other agent that can run shell commands.
 
 ## How it is enforced
 

@@ -364,21 +364,22 @@ class Prompt:
         deny.connect("clicked", lambda *_: dlg.response(0))
         once = Gtk.Button(label="Allow once")
         once.connect("clicked", lambda *_: dlg.response(1))
+        session = Gtk.Button(label="This session")
+        session.connect("clicked", lambda *_: dlg.response(2))
+        always = Gtk.Button(label="Always")
+        always.connect("clicked", lambda *_: dlg.response(3))
         buttons.add(deny)
         buttons.add(once)
+        buttons.add(session)
+        buttons.add(always)
 
+        # The dropdown keeps only the fixed durations.
         menu = Gtk.Menu()
         ids = {}
         nid = 10
         for label, secs in TIMED_CHOICES.items():
             item = Gtk.MenuItem(label=label)
             ids[nid] = f"timed:{secs}"
-            item.connect("activate", lambda _w, i=nid: dlg.response(i))
-            menu.append(item)
-            nid += 1
-        for label, scope in [("This session", "session"), ("Always", "always")]:
-            item = Gtk.MenuItem(label=label)
-            ids[nid] = scope
             item.connect("activate", lambda _w, i=nid: dlg.response(i))
             menu.append(item)
             nid += 1
@@ -396,6 +397,10 @@ class Prompt:
             scope = "deny"
         elif response == 1:
             scope = "once"
+        elif response == 2:
+            scope = "session"
+        elif response == 3:
+            scope = "always"
         else:
             scope = ids.get(response, "deny")
         dlg.destroy()

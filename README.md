@@ -10,39 +10,6 @@ program. When it tries to change something read-only, or asks to add a folder,
 a prompt appears on your real desktop and the answer is enforced by the kernel
 (the FUSE daemon), not by the application.
 
-Status: working end to end — deny-by-default FUSE root, runtime write grants,
-an interactive prompt broker (once / 10 min / 1 h / 6 h / 12 h / this session /
-always) with an audit log, and an in-sandbox "add a folder" request. Per-project
-profiles and a dedicated UID are still to come.
-
-## Layout
-
-The repository is **code only**. Everything it writes at runtime lives in a run
-directory you choose.
-
-```
-fsbroker/
-├── bin/
-│   ├── fsbroker           the host entry point (mount, broker, run, status, …)
-│   ├── fsbroker-status    one view of what the agent can currently access
-│   └── fsbroker-request   the in-sandbox "add a folder" client
-├── vroot/                 the FUSE daemon (Rust, fuser + libfuse3)
-├── broker/                the prompt broker (Python + Gtk3)
-│   ├── broker.py          dialogs, durable grants, audit log
-│   └── brokerctl          host-side client
-├── config/
-│   └── vroot.example.toml a starting config
-├── examples/
-│   └── skill/request-access/SKILL.md  example agent skill for asking to add a folder
-├── docs/                  design notes and phase reports
-└── prototype/             development-only experiments (phase 1/2), not used
-                           at runtime
-```
-
-A run directory (e.g. `~/fsbroker_opencode`) holds the mount point, sockets,
-pids, broker state, audit log, logs, the sandbox home, and the generated
-`etc-view`/`placeholders`. None of it is in the repository.
-
 ## Getting started
 
 Build the daemon (Rust; needs `cargo` and libfuse3):
@@ -61,7 +28,7 @@ $EDITOR ~/.config/fsbroker/vroot.toml
 
 Two placeholders are expanded before the daemon reads the config:
 
-- `${run}` — the run directory
+- `${run}` — the run directory, including the virtual root
 - `${home}` — the sandbox's writable home (default `<run>/home`)
 
 Locations (override with flags or the environment):
@@ -74,40 +41,33 @@ Locations (override with flags or the environment):
 
 ## Using it
 
-```bash
-bin/fsbroker --run-dir ~/fsbroker_opencode session      # mount + broker + the app, tear down on exit
-bin/fsbroker --run-dir ~/fsbroker_opencode shell        # a shell inside the sandbox
-bin/fsbroker --run-dir ~/fsbroker_opencode run ls /     # one command inside
-bin/fsbroker --run-dir ~/fsbroker_opencode status       # what the agent can access
-bin/fsbroker --run-dir ~/fsbroker_opencode approvals    # remembered write approvals
-bin/fsbroker --run-dir ~/fsbroker_opencode paths        # resolved locations
-```
+For everyday use there is one thing to do: tailor `run-opencode.sh` and point a
+desktop menu item (or a shortcut) at it. That is the whole workflow.
 
-`approvals` also takes `grant <always|session|timed:seconds> <path>`, `revoke
-<path>` and `clear`, so you can pre-authorise a write without waiting for a
-prompt. (The lower-level client is `broker/brokerctl`, which needs `--run-dir`
-or `FSBROKER_RUN_DIR`.)
-
-`session` with no argument launches the OpenCode desktop GUI; give it a command
-to run that instead:
+The launcher sets where runtime lives, which config to use, and the program to
+run, then calls:
 
 ```bash
-bin/fsbroker --run-dir ~/fsbroker_opencode session -- /usr/bin/python3 app.py
+bin/fsbroker ... session -- <program> [args]
 ```
 
-Manual lifecycle, if you prefer:
+`session` mounts the virtual root, starts the broker, runs the program, and
+unmounts and stops the broker again when it exits. There is nothing else to run.
+
+Everything app-specific lives in `run-opencode.sh` — copy it and change the
+program to sandbox something else. `bin/fsbroker` itself knows nothing about
+OpenCode.
+
+The two commands worth knowing:
 
 ```bash
-bin/fsbroker ... mount        # start the daemon
-bin/fsbroker ... broker start # start the prompt broker (Gtk dialogs)
-bin/fsbroker ... shell        # ... do things
-bin/fsbroker ... broker stop
-bin/fsbroker ... umount
+bin/fsbroker ... status                              # what the agent can access
+bin/fsbroker-status --run-dir ~/fsbroker_opencode    # the same, standalone
 ```
 
-A desktop menu item is a one-liner that calls `session`; keep the run dir and
-config in flags. There is also a small `run-opencode.sh` in the repo that does
-exactly that for OpenCode.
+`bin/fsbroker` also has `shell`, `run`, `mount`, `umount`, `broker` and
+`approvals` for manual use and troubleshooting; none of it is needed for normal
+operation.
 
 ## The two things the agent can do
 
@@ -183,12 +143,10 @@ filesystem), `policy.rs` (runtime grants), `ctl.rs` (host-only control socket),
 `req.rs` (sandbox request socket), `broker.rs` (prompt-broker client), `sys.rs`
 (`openat2`/`stat`/`getdents64`).
 
-## Known limitations (important)
+## Known limitations
 
 - **X11 is not isolated.** The sandbox talks to the host X server, so it can
-  observe and control other X clients, including the prompt. Accepted for now;
-  Xephyr or a private compositor is the fix before the prompt is a security
-  boundary.
+  observe and control other X clients, including the prompt.
 - **The network namespace is shared.** The sandbox sees the host loopback and
   LAN (that is also why its OpenCode service must use a different port).
 - **Same UID.** It runs as your UID, so the boundary is the mount namespace, not
@@ -202,11 +160,3 @@ filesystem), `policy.rs` (runtime grants), `ctl.rs` (host-only control socket),
 - **One daemon, no supervisor.** If the daemon dies while mounted, the mount
   point reports `ENOTCONN` until it is unmounted (`fsbroker umount` handles it).
 
-## Development
-
-`prototype/` keeps the history: phase 1 (a plain bubblewrap sandbox) and phase 2
-(the virtual root, its reports and the 54-check test matrix). It is not used at
-runtime and its harness predates the run-directory model, so it still needs
-repointing at `bin/fsbroker`. See `docs/phase2-report.md` for the design,
-bugs found while running a real Electron app on the mount, and the
-per-project/per-session permission model.

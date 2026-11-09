@@ -266,6 +266,18 @@ def default_icon():
     return None
 
 
+def read_native_mounts(run_dir):
+    """Paths `bin/fsbroker` binds straight from the host, bypassing the vroot,
+    as recorded in the run directory."""
+    if not run_dir:
+        return set()
+    try:
+        with open(os.path.join(run_dir, "native-mounts")) as f:
+            return {line.strip() for line in f if line.strip()}
+    except OSError:
+        return set()
+
+
 def read_config_source(run_dir):
     """The config file the session was started with, as recorded by
     `bin/fsbroker` in the run directory."""
@@ -297,11 +309,16 @@ def mount_roots(run_dir):
     # The daemon names paths the way the sandbox sees them, so the cap uses
     # virtual_path, which equals host for identity mappings and differs only
     # where a mount is placed somewhere else.
+    # Paths bound straight from the host are not candidates: no lookup of them
+    # ever reaches the daemon, so a rule about one could never fire.
+    native = set(read_native_mounts(run_dir))
     roots = []
     for m in cfg.get("mount", []):
         v = m.get("virtual_path") or m.get("host")
         if v and v.startswith("/"):
-            roots.append(os.path.normpath(v))
+            v = os.path.normpath(v)
+            if v not in native:
+                roots.append(v)
     roots.sort(key=len, reverse=True)
     return roots
 

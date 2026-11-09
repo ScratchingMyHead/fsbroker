@@ -57,6 +57,37 @@ AUTO_MOUNTS="${CONFIG}.d/mounts.toml"
 DAEMON="$REPO/vroot/target/release/vroot"
 LOG_DIR="$RUN_DIR/log"
 
+# The daemon holds a descriptor for every open file inside the sandbox, so its
+# limit is the sandbox's shared budget for open files — and every process we
+# start inherits this too. A launcher hands out a soft limit of 1024; the hard
+# limit is usually enormous, and soft may be raised to it without privilege.
+ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
+
+# Read-only host trees served by the kernel instead of through the vroot.
+#
+# Libraries are the bulk of what any program opens — every process maps ~135 of
+# them — and each open through the vroot costs a file descriptor in the daemon
+# and a trip through its single-threaded loop. Binaries cost one descriptor per
+# running process, not 135, and an install may legitimately want to write them,
+# so /usr/bin, /bin and /sbin stay on the vroot where the broker can still be
+# asked. Same for /etc, /usr/local and /var, which are the places worth
+# guarding.
+NATIVE_MOUNTS=(
+  /usr/lib /usr/lib64 /usr/libexec /usr/share /opt/OpenCode
+  /lib /lib64
+)
+
+# Those of the above the sandbox can actually reach. Binding over a path the
+# vroot does not have would make bubblewrap try to create it inside a read-only
+# tree, so each is checked through the mount point. The result is recorded in the
+# run directory and read by `fsbroker-status` and the rule manager.
+native_mounts_active() {
+  local p
+  for p in "${NATIVE_MOUNTS[@]}"; do
+    [ -e "$p" ] && [ -e "$MOUNT$p" ] && printf '%s\n' "$p"
+  done
+}
+
 HOST_USER=${HOST_USER:-$(id -un)}
 HOST_USER_HOME=$(getent passwd "$HOST_USER" | cut -d: -f6)
 DISPLAY=${DISPLAY:-:0}
@@ -82,6 +113,7 @@ resolve_config() {
   # Record where the config came from, so the broker and the rule manager can
   # find the sidecar of permanently-approved mounts without being told again.
   printf '%s\n' "$CONFIG" > "$RUN_DIR/config-source"
+
 }
 
 prepare_run_dir() {
@@ -211,7 +243,14 @@ cmd_mount() {
     >>"$LOG_DIR/vroot.log" 2>&1 &
   echo $! > "$RUN_DIR/vroot.pid"
   local i
-  for i in $(seq 1 50); do is_mounted && { say "mounted"; return 0; }; sleep 0.1; done
+  for i in $(seq 1 50); do
+    is_mounted && {
+      native_mounts_active > "$RUN_DIR/native-mounts"
+      say "mounted"
+      return 0
+    }
+    sleep 0.1
+  done
   die "mount did not appear; see $LOG_DIR/vroot.log"
 }
 
@@ -308,6 +347,14 @@ sandbox_args() {
   for v in OPENROUTER_API_KEY VLLM_API_KEY; do
     [ -n "${!v:-}" ] && BWRAP_ARGS+=(--setenv "$v" "${!v}")
   done
+
+  # The read-only bulk, straight from the host: no vroot, no descriptors in the
+  # daemon, no prompts (and no way for the broker to allow a write either — it
+  # is a plain read-only bind).
+  local p
+  while read -r p; do
+    BWRAP_ARGS+=(--ro-bind "$p" "$p")
+  done < <(native_mounts_active)
 
   # The real /etc is a vroot mount; these few files are bound over it. Guarded
   # on existence so a run dir mounted before this existed still works.

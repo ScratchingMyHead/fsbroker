@@ -68,6 +68,19 @@ def query(sock, line, timeout=5):
     return b"".join(chunks).decode(errors="replace").splitlines()
 
 
+def native_mounts(run_dir):
+    """Paths `bin/fsbroker` binds straight from the host, bypassing the vroot.
+
+    They are visible and read-only, but no lookup reaches the daemon, so no rule
+    about them can ever fire.
+    """
+    try:
+        with open(os.path.join(run_dir, "native-mounts")) as f:
+            return [line.strip() for line in f if line.strip()]
+    except OSError:
+        return []
+
+
 def config_source(run_dir):
     """The config file the session was started with, as recorded by `mount`."""
     try:

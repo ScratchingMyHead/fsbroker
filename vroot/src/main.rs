@@ -14,6 +14,44 @@ use fuser::MountOption;
 use crate::config::{Config, MountTable, NodeKind};
 use crate::fs::VrootFs;
 
+/// Raise the soft open-file limit to the hard limit.
+///
+/// The daemon holds a descriptor for every open file in the sandbox, so its
+/// limit *is* the sandbox's budget for open files — shared by every process in
+/// there. A desktop launcher hands out a soft limit of 1024 and the hard limit
+/// is usually far larger; raising soft up to hard never needs privilege, and
+/// without this a GUI application exhausts the budget and every `open()` in the
+/// sandbox starts failing with EMFILE.
+fn raise_nofile_limit() {
+    unsafe {
+        let mut lim: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
+            return;
+        }
+        if lim.rlim_cur >= lim.rlim_max {
+            log::info!("open-file limit is {}", lim.rlim_cur);
+            return;
+        }
+        let want = libc::rlimit {
+            rlim_cur: lim.rlim_max,
+            rlim_max: lim.rlim_max,
+        };
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &want) == 0 {
+            log::info!(
+                "open-file limit raised from {} to {}",
+                lim.rlim_cur,
+                lim.rlim_max
+            );
+        } else {
+            log::warn!(
+                "could not raise the open-file limit (soft {}, hard {})",
+                lim.rlim_cur,
+                lim.rlim_max
+            );
+        }
+    }
+}
+
 fn usage() {
     eprintln!(
         "vroot — deny-by-default FUSE virtual root
@@ -48,6 +86,7 @@ it they default to the mount point's parent directory."
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    raise_nofile_limit();
 
     let mut config_path: Option<PathBuf> = None;
     let mut config_extra: Option<PathBuf> = None;

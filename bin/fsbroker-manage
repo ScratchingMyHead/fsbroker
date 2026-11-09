@@ -256,11 +256,18 @@ class Manager(Gtk.Window):
 
         # --- visible mounts ---
         grid = self.grids["mounts"]
+        native = set(proto.native_mounts(self.run_dir))
         if not daemon_up:
             self.note(grid, 0, "(daemon not running — nothing is mounted)")
         else:
-            for row, (access, source, vpath, host) in enumerate(
-                    sorted(proto.parse_mounts(mounts), key=lambda r: r[2])):
+            shown = sorted(proto.parse_mounts(mounts), key=lambda r: r[2])
+            listed = {r[2] for r in shown}
+            for row, (access, source, vpath, host) in enumerate(shown):
+                if vpath in native:
+                    # Served by the kernel: visible, read-only, no rule applies.
+                    self.row(grid, row, [vpath, access, "kernel"], None,
+                             alt=(row % 2 == 1))
+                    continue
                 where = {"config": "config",
                          "permanent": "approved"}.get(source, "session request")
                 note = "" if source == "config" else f"   (-> {host})"
@@ -272,6 +279,9 @@ class Manager(Gtk.Window):
                     remove = ("mount", vpath)
                 self.row(grid, row, [vpath + note, access, where], remove,
                          alt=(row % 2 == 1))
+            for extra, vpath in enumerate(sorted(native - listed)):
+                self.row(grid, len(shown) + extra, [vpath, "ro", "kernel"], None,
+                         alt=((len(shown) + extra) % 2 == 1))
 
         # --- rules, from both sources ---
         allows = []

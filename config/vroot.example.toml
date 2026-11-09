@@ -43,6 +43,12 @@ host = "/lib64"
 [[mount]]
 host = "/opt/OpenCode"
 
+# The read-only bulk — /usr/lib, /usr/share, /lib*, /opt/OpenCode — is bound
+# straight from the host by bin/fsbroker rather than served through the vroot:
+# libraries are most of what any program opens, and the daemon holds one
+# descriptor per open file. Those paths never prompt; the list is NATIVE_MOUNTS
+# in bin/fsbroker, and only paths mapped here are bound.
+#
 # The real /etc, read-only. The sandbox runs as your uid, so this shows exactly
 # what you can already read: /etc/shadow, /etc/sudoers, /etc/ssl/private and the
 # like are root-only and stay unreadable. What it buys is the real thing instead
@@ -94,3 +100,9 @@ host = "${run}/placeholders/run"
 # dev = true
 # [[pass]]
 # host = "/run/user/1000/bus"        # the session D-Bus: a big capability
+#
+# Hardware rendering for mpv/Rhythmbox and other GPU clients. The render node
+# cannot set display modes, unlike card0/card1, so it is the one to expose.
+# [[pass]]
+# host = "/dev/dri/renderD128"
+# dev = true

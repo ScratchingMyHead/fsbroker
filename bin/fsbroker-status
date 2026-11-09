@@ -35,18 +35,26 @@ def report(run_dir):
 
     # --- visibility -------------------------------------------------------
     section("VISIBLE — paths that exist inside the sandbox")
+    native = set(proto.native_mounts(run_dir))
     if mounts is None:
         print("  (daemon not running — nothing is mounted)")
     else:
         rows = proto.parse_mounts(mounts)
         # config first, then this session's requests, each alphabetical
         rows.sort(key=lambda r: (r[1] != "config", r[2]))
-        w = max((len(r[2]) for r in rows), default=4)
+        w = max([len(r[2]) for r in rows] + [len(p) for p in native] + [4])
         for access, source, vpath, host in rows:
+            if vpath in native:
+                print(f"  {vpath:<{w}}  {access:<2}  kernel")
+                continue
             src = {"config": "config        ",
                    "permanent": "approved      "}.get(source, "session request")
             note = "" if source == "config" else f"   (-> {host})"
             print(f"  {vpath:<{w}}  {access:<2}  {src}{note}")
+        # Bypassing the vroot means the daemon never hears about these paths.
+        listed = {r[2] for r in rows}
+        for p in sorted(native - listed):
+            print(f"  {p:<{w}}  ro  kernel")
 
     # --- write approvals --------------------------------------------------
     section("WRITE APPROVALS — modifications allowed with no prompt")
@@ -99,6 +107,7 @@ def main():
 
     print()
     print("Notes: config = permanent (vroot.toml). session request = approved this run.")
+    print("       kernel = bound straight from the host: read-only, and never prompts.")
     print("       A rule covers its path and everything under it: a file path")
     print("       covers that file alone, a folder path covers its subtree.")
     print("       Anything not listed above is ENOENT to the agent.")

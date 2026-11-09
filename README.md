@@ -226,12 +226,28 @@ filesystem), `policy.rs` (runtime grants), `ctl.rs` (host-only control socket),
 `req.rs` (sandbox request socket), `broker.rs` (prompt-broker client), `sys.rs`
 (`openat2`/`stat`/`getdents64`).
 
-## Real files, and the two exceptions
+## Real files, and the three exceptions
 
 The virtual root serves the host's own files; nothing is copied, so nothing can
-go stale. Two things need more than a mapping, and both are visible in the
-config:
+go stale. Three things need more than a mapping:
 
+- **The read-only bulk is bound straight from the host**, bypassing the vroot:
+  `/usr/lib`, `/usr/lib64`, `/usr/libexec`, `/usr/share`, `/opt/OpenCode`, `/lib`
+  and `/lib64` (the list is `NATIVE_MOUNTS` in `bin/fsbroker`, and only paths the
+  config actually maps are bound). The reason is the daemon's descriptor budget:
+  it holds one file descriptor for *every open file in the sandbox*, so its
+  `RLIMIT_NOFILE` is the sandbox's shared budget, and libraries are the bulk of
+  what any program opens — every process maps about 135 of them. Measured on a
+  running session: 551 of the daemon's 712 descriptors were
+  `/usr/lib/x86_64-linux-gnu`. Serving those from the kernel instead removes
+  ~87% of the pressure and takes the single-threaded FUSE loop off the library
+  path. `fsbroker-status` shows them as `kernel`.
+
+  The trade is explicit: a bind is a *real* host bind, so root in a `root-shell`
+  can `mount -o remount,rw` it and write through — unlike a vroot mount, where
+  the daemon still decides no matter what the mount flags say. That is why only
+  the paths you never want a prompt for are bound, and `/usr/bin`, `/bin`,
+  `/sbin`, `/etc`, `/usr/local` and `/var` are deliberately left on the vroot.
 - **A few `/etc` files are bound over the real `/etc`** — `passwd` and `group`
   (so the sandbox user's home is `/home/agent`), `hostname`, `hosts` and
   `machine-id`. Everything else is the host's own `/etc`, read-only. That is
@@ -259,8 +275,14 @@ config:
   LAN (that is also why its OpenCode service must use a different port).
 - **Same UID.** It runs as your UID, so the boundary is the mount namespace, not
   the UID.
-- **The FUSE loop is single-threaded** (`fuser` 0.14): while a prompt is open the
-  whole mount waits for the answer (up to 5 minutes).
+- **The FUSE loop is single-threaded** (`fuser` 0.14): while a prompt is open
+  everything *on the vroot* waits for the answer (up to 5 minutes). Much less
+  painful since the read-only bulk moved to kernel binds, but a process doing a
+  lot of I/O on a granted path still blocks others.
+- **The daemon's descriptor limit is the sandbox's**, shared by every process in
+  it: it holds one descriptor per open file. Both are now raised to the hard
+  limit at startup (a launcher otherwise hands out 1024), so it no longer
+  rears its head, but a runaway process can still exhaust the pool.
 - **1 s attribute TTL** (`fuser` has no invalidation), so changes can take up to
   a second to be visible.
 - **One daemon, no supervisor.** If the daemon dies while mounted, the mount

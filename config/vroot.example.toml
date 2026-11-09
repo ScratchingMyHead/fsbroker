@@ -101,8 +101,10 @@ host = "${run}/placeholders/run"
 # [[pass]]
 # host = "/run/user/1000/bus"        # the session D-Bus: a big capability
 #
-# Hardware rendering for mpv/Rhythmbox and other GPU clients. The render node
-# cannot set display modes, unlike card0/card1, so it is the one to expose.
+# The GPU's render node is passed through by default (it is what OpenGL, Vulkan
+# and VA-API use, and cannot set display modes). If a client still falls back to
+# software rendering, the modesetting node is what is missing — add it here, and
+# note that it can change your display's resolution and refresh rate.
 # [[pass]]
-# host = "/dev/dri/renderD128"
+# host = "/dev/dri/card1"
 # dev = true

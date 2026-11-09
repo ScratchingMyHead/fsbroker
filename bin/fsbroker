@@ -157,6 +157,11 @@ EOF
 # the name (connect() through the vroot fails) — and they sit under /run and
 # /dev, which are built here rather than mapped. This is the same treatment X11
 # and the request socket already get.
+#
+# What is here by default: the sound sockets and /dev/snd, systemd-resolved's
+# resolv.conf (which /etc/resolv.conf points into), and the GPU's render node.
+# renderD128 is what OpenGL, Vulkan and VA-API use, and it cannot set display
+# modes — /dev/dri/card1 would allow that, and is left to the config.
 default_passthroughs() {
   local xdg=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
   printf '%s\n' \
@@ -164,6 +169,7 @@ default_passthroughs() {
     "ro $xdg/pipewire-0" \
     "ro $xdg/pipewire-0-manager" \
     "dev /dev/snd" \
+    "dev /dev/dri/renderD128" \
     "ro /run/systemd/resolve/stub-resolv.conf" \
     "ro /run/systemd/resolve/resolv.conf"
 }

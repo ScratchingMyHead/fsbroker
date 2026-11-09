@@ -261,11 +261,12 @@ go stale. Three things need more than a mapping:
   name, but `connect()` through it fails, because the kernel needs a real socket
   inode, and devices are the same. They also live under `/run` and `/dev`, which
   bubblewrap builds rather than mounts. The ones a desktop needs are on by
-  default — the PipeWire/Pulse socket, `/dev/snd`, and systemd-resolved's
-  `resolv.conf`, which `/etc/resolv.conf` points into — and `[[pass]]` adds
-  more (see the example config). Note what the audio ones include: the same
-  socket allows recording, and `/dev/snd` is raw hardware access that bypasses
-  the sound server.
+  default — the PipeWire/Pulse socket, `/dev/snd`, systemd-resolved's
+  `resolv.conf` (which `/etc/resolv.conf` points into), and the GPU's render node
+  `/dev/dri/renderD128` — and `[[pass]]` adds more (see the example config). Note
+  what the audio ones include: the same socket allows recording, and `/dev/snd`
+  is raw hardware access that bypasses the sound server. The render node is the
+  one that cannot set display modes; `card0`/`card1` can, and stay in the config.
 
 ## Known limitations
 

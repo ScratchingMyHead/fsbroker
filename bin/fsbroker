@@ -110,6 +110,13 @@ resolve_config() {
   [ -f "$CONFIG" ] || die "no config file at $CONFIG (copy config/vroot.example.toml)"
   # Expand the two placeholders into a concrete config the daemon reads.
   sed -e "s|\${run}|$RUN_DIR|g" -e "s|\${home}|$HOME_HOST|g" "$CONFIG" > "$RESOLVED"
+  # bubblewrap can only bind over a path that already exists in the virtual
+  # root, and the default pass-throughs include /sys. Add its placeholder here
+  # rather than making every config list an empty directory to expose a device.
+  if ! grep -qE 'virtual_path[[:space:]]*=[[:space:]]*"/sys"' "$RESOLVED"; then
+    printf '\n# Added by bin/fsbroker: somewhere for the read-only /sys bind to land.\n[[mount]]\nvirtual_path = "/sys"\nhost = "%s/placeholders/sys"\n' \
+      "$RUN_DIR" >> "$RESOLVED"
+  fi
   # Record where the config came from, so the broker and the rule manager can
   # find the sidecar of permanently-approved mounts without being told again.
   printf '%s\n' "$CONFIG" > "$RUN_DIR/config-source"
@@ -121,6 +128,7 @@ prepare_run_dir() {
            "$RUN_DIR/tmp" "$RUN_DIR/shm" "$RUN_DIR/user1000" \
            "$RUN_DIR/placeholders/proc" "$RUN_DIR/placeholders/dev" \
            "$RUN_DIR/placeholders/tmp" "$RUN_DIR/placeholders/run" \
+           "$RUN_DIR/placeholders/sys" \
            "$HOME_HOST/.local/bin"
   chmod 700 "$RUN_DIR/user1000"
   chmod 1777 "$RUN_DIR/tmp" "$RUN_DIR/shm"
@@ -162,6 +170,11 @@ EOF
 # resolv.conf (which /etc/resolv.conf points into), and the GPU's render node.
 # renderD128 is what OpenGL, Vulkan and VA-API use, and it cannot set display
 # modes — /dev/dri/card1 would allow that, and is left to the config.
+#
+# /sys is read-only host sysfs, and it is what makes the GPU work at all:
+# libdrm's drmGetDevice2() reads /sys/dev/char/<major>:<minor>/device to
+# identify the device, so without it Mesa finds no GPU and silently falls back
+# to software rendering even though the device node is present.
 default_passthroughs() {
   local xdg=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
   printf '%s\n' \
@@ -170,6 +183,7 @@ default_passthroughs() {
     "ro $xdg/pipewire-0-manager" \
     "dev /dev/snd" \
     "dev /dev/dri/renderD128" \
+    "ro /sys" \
     "ro /run/systemd/resolve/stub-resolv.conf" \
     "ro /run/systemd/resolve/resolv.conf"
 }

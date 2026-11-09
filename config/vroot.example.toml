@@ -89,9 +89,16 @@ host = "${run}/placeholders/run"
 # device nodes are the same. They also live under /run and /dev, which are built
 # by bubblewrap rather than mapped.
 #
-# The ones a desktop normally needs are built in (the PipeWire/Pulse socket,
-# /dev/snd for ALSA, and systemd-resolved's resolv.conf, which /etc/resolv.conf
-# points into). Add more here; `dev = true` binds a device node.
+# The ones a desktop normally needs are built in: the PipeWire/Pulse socket,
+# /dev/snd, systemd-resolved's resolv.conf (which /etc/resolv.conf points into),
+# the GPU's render node, and read-only /sys — the last two because libdrm reads
+# sysfs to identify the GPU, so without /sys Mesa silently falls back to
+# software rendering.
+#
+# Add more here; `dev = true` binds a device node. The path must exist inside the
+# sandbox: /run, /dev, /sys and /tmp already do (bubblewrap builds them), but
+# anything else needs a placeholder [[mount]] like the ones above, or bubblewrap
+# reports "Can't mkdir … Read-only file system".
 #
 # [[pass]]
 # host = "/run/user/1000/pipewire-0"

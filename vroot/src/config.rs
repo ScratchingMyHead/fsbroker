@@ -21,6 +21,9 @@ pub struct RootConfig {
     pub read_only: bool,
     #[serde(default, rename = "mount")]
     pub mounts: Vec<MountSpec>,
+    /// Bind pass-throughs. Parsed only to keep the field known; see `PassSpec`.
+    #[serde(default)]
+    pub pass: Vec<PassSpec>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -35,6 +38,21 @@ pub struct MountSpec {
     /// Whether the agent may modify this subtree.
     #[serde(default)]
     pub writable: bool,
+}
+
+/// One `[[pass]]` entry: a host object bound in as-is.
+///
+/// The daemon never acts on these — `bin/fsbroker` reads them when it builds
+/// bubblewrap's arguments — but they have to be a known field, because the
+/// config is parsed with `deny_unknown_fields` and a typo should still be an
+/// error rather than a silently ignored line.
+#[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]     // read by bin/fsbroker, not by the daemon
+pub struct PassSpec {
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub dev: bool,
 }
 
 /// A validated, opened mount.
